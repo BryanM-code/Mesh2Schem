@@ -41,8 +41,8 @@ DYES = {
 DYED_MATERIALS = {
     "_wool": 1.0, "_concrete": 1.0, "_concrete_powder": 1.08, "_carpet": 1.0,
     "_terracotta": 0.72, "_glazed_terracotta": 0.85, "_stained_glass": 1.15,
-    "_stained_glass_pane": 1.15, "_bed": 1.0, "_banner": 1.0, "_shulker_box": 0.9,
-    "_candle": 1.0,
+    "_stained_glass_pane": 1.15, "_bed": 1.0, "_banner": 1.0, "_wall_banner": 1.0,
+    "_shulker_box": 0.9, "_candle": 1.0,
 }
 
 # ── Wood types ────────────────────────────────────────────────────────────────
@@ -164,6 +164,29 @@ BASE_COLORS = {
     "dandelion": (232, 224, 62), "poppy": (194, 54, 46), "wheat": (176, 165, 65),
     "sunflower": (238, 213, 66), "rose_bush": (168, 47, 46), "peony": (206, 166, 209),
     "lilac": (191, 158, 199), "dead_bush": (109, 78, 35),
+    # Flowers and foliage a modern world is full of, found missing while importing a
+    # Bedrock export -- without these a garden renders as grey gravel.
+    "azure_bluet": (221, 227, 189), "cornflower": (70, 106, 199),
+    "oxeye_daisy": (226, 231, 205), "lily_of_the_valley": (231, 236, 222),
+    "allium": (169, 125, 200), "blue_orchid": (47, 174, 200),
+    "red_tulip": (190, 47, 41), "orange_tulip": (196, 118, 33),
+    "white_tulip": (222, 229, 222), "pink_tulip": (222, 178, 216),
+    "short_grass": (95, 159, 53), "spore_blossom": (222, 116, 168),
+    "torchflower": (233, 156, 62), "pitcher_plant": (155, 106, 189),
+    "glow_lichen": (114, 133, 111), "flowering_azalea": (110, 133, 62),
+    "azalea": (91, 132, 41), "spruce_sapling": (49, 88, 49),
+    "oak_sapling": (60, 143, 40), "birch_sapling": (128, 167, 85),
+    "hanging_roots": (150, 111, 88), "big_dripleaf": (109, 148, 55),
+    "small_dripleaf": (97, 138, 47), "moss_carpet": (89, 109, 45),
+    # Fixtures and utility blocks.
+    "ender_chest": (42, 62, 62), "lightning_rod": (155, 111, 92),
+    "heavy_weighted_pressure_plate": (220, 220, 220),
+    "light_weighted_pressure_plate": (246, 208, 61),
+    "wither_skeleton_skull": (57, 57, 57), "skeleton_skull": (194, 194, 194),
+    "player_head": (140, 105, 78), "zombie_head": (82, 118, 71),
+    "creeper_head": (114, 189, 96), "dragon_head": (36, 30, 40),
+    "barrier": (196, 60, 60), "structure_void": (140, 90, 140),
+    "item_frame": (129, 103, 68), "glow_item_frame": (150, 132, 84),
     # Liquids
     "water": (63, 118, 228), "lava": (223, 118, 24),
 }

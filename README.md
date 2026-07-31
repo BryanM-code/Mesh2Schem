@@ -27,8 +27,9 @@ named folders) and survives across sessions. Status is always *derived* from whi
 exist, and names the first one still missing.
 
 - **Add New Build** — drop one schematic (detailed review) or many at once (batch list).
-  Both `.schem` and the older `.schematic` are accepted; anything legacy is **converted to
-  `.schem`** on the way in. Dimensions are read instantly; content is sha256-hashed and
+  `.schem`, the older `.schematic`, and Bedrock `.mcworld` world exports are all accepted;
+  legacy files are **converted to `.schem`** on the way in and a world opens a map you cut
+  a build out of. Dimensions are read instantly; content is sha256-hashed and
   dedup-checked. Your original files are **copied in, never moved or deleted**.
 - **Library** — every build as a **thumbnail grid** or a searchable / filterable / sortable
   table (your choice is remembered), with stage badges, progress pips and a CSV export.
@@ -100,6 +101,9 @@ BuildDataCollector/
   schem_convert.py         # format detection + legacy .schematic -> .schem conversion
   legacy_blocks.py         # pre-1.13 block id:data -> modern blockstate table
   schem_meta.py            # reads schematic Width/Height/Length + sha256
+  bedrock_world.py         # reads a Bedrock .mcworld (zip + LevelDB + subchunks)
+  mcworld_convert.py       # a region of a world -> Sponge .schem
+  mcworld_preview.py       # top-down map of a world, for picking that region
   schem_voxels.py          # decodes a .schem into a voxel grid (for thumbnails)
   block_colors.py          # blockstate -> approximate RGB (for thumbnails)
   thumbs.py                # isometric renders of a schem and a glb, cached on disk
@@ -141,6 +145,7 @@ Builds downloaded from the internet come in two formats, and both are accepted:
 | --- | --- |
 | **Sponge `.schem`** (v1 / v2 / v3) | Stored byte-for-byte as-is. |
 | **MCEdit `.schematic`** (pre-1.13) | Converted to Sponge **v2** and stored as `.schem`. |
+| **Bedrock `.mcworld`** | A whole world — you pick a region on a map, which is converted to Sponge **v2**. See [Bedrock world exports](#bedrock-world-exports-mcworld). |
 
 The format is decided by reading the file, never by its extension — a `.schem` that is
 really an old MCEdit file still gets converted, and a `.schematic` that is really Sponge
@@ -172,6 +177,73 @@ silently: **unmapped block ids** (almost always modded blocks — they become st
 build's shape survives) and **entities** (mobs, item frames, armour stands), which are not
 part of a build's geometry. Item contents inside chests are copied across untouched but
 are not themselves flattened.
+
+## Bedrock world exports (`.mcworld`)
+
+A `.mcworld` is a **Bedrock Edition world export** — a ZIP holding `level.dat` and a LevelDB
+database of chunks. It is not a schematic, so it can't just be stored: a world holds a whole
+area, often several separate builds, and the library's unit is one build.
+
+Drop one on the Add page and you get a map of it instead:
+
+```
+Dropped: suburbia-karma-2025-09-23-4-56-51-am.mcworld
+  1,780 subchunks · 111,670 built blocks
+
+  ┌──────────────────────────────────────┐
+  │   ▩▩   trees    ▩▩▩        ▩▩       │   top-down render, coloured
+  │  ▩▩▩  ┌───────┐  road  ▩▩▩▩▩   ▩    │   by block. drag a box over
+  │   ▩▩  │ house  │ ▩▩▩       ▩▩  ▩▩▩  │   one house.
+  │  ▩▩▩  └───────┘  ▩▩▩▩   ▩▩▩▩▩       │
+  └──────────────────────────────────────┘
+  selection 51x34x51 · 88,434 blocks
+  [ Save this region as a build ]
+```
+
+The blue box is drawn where the world **looked built** — everything that isn't air or the
+flat ground plate of bedrock/dirt/grass. That detection isn't a convenience, it's what
+makes the file importable at all: the example world above is 672 × 48 × 624 =
+**20,127,744 blocks**, past the 16,000,000 limit, while the built area is 210 × 34 × 205 =
+**1,463,700**. Narrow it to one house from there.
+
+Once saved it's an ordinary build — a Sponge `.schem` like any other — so thumbnails,
+screenshots, the AI image and TRELLIS pairing all work unchanged.
+
+### What survives the conversion, and what doesn't
+
+**Block names come across.** Modern Bedrock uses the same `minecraft:<name>` vocabulary as
+Java — `quartz_stairs`, `oak_log`, `deepslate_tile_stairs` are identical — so
+`mcworld_convert.NAME_ALIASES` is a short exceptions table rather than a second
+`legacy_blocks`. It covers the genuine differences (`noteblock` → `note_block`,
+`wooden_door` → `oak_door`, `darkoak_wall_sign` → `dark_oak_wall_sign`).
+
+**Block states do not.** Bedrock spells them differently (`weirdo_direction` for stair
+facing, `upside_down_bit` for slab halves), and translating them faithfully is a table the
+size of `legacy_blocks`. Every block therefore lands in its **default state**: shapes,
+materials and colours are right, but a staircase may face the wrong way. That's what the
+thumbnails and TRELLIS need, and the conversion records it in the build's notes rather than
+pretending otherwise. Block entities — chest contents, sign text, banner colours — are
+dropped for the same reason.
+
+### How it's read
+
+No LevelDB library is involved; the whole path is stdlib `zipfile` + `struct` + `zlib`,
+in `bedrock_world.py`. Three formats stack up:
+
+| Layer | What it is |
+| --- | --- |
+| **SST** | LevelDB's table format: a footer points at an index block, which points at data blocks of prefix-compressed key/value pairs. Mojang adds compression type 4, raw zlib. |
+| **Chunk keys** | `<cx int32 LE><cz int32 LE>[<dim>]<tag>[<subY>]`; tag `0x2F` is a 16×16×16 subchunk. |
+| **Subchunk** | Bit-packed palette indices, then the palette as *little-endian* NBT — Bedrock's byte order, so `nbt_safe`'s Java reader can't be pointed at it. |
+
+One detail worth knowing if you ever touch this: SST stores **internal** keys — the user key
+plus an 8-byte sequence/type trailer. Forget to strip it and every key is 8 bytes too long
+and nothing matches the chunk layout at all.
+
+World files get the same distrust as everything else here: entry counts, uncompressed size,
+decompressed block size, record counts and palette lengths are all capped before anything is
+allocated, and archive entry names are matched exactly rather than joined onto a path, so a
+`../../` entry is simply never a name it looks for.
 
 ## Safety of downloaded files
 

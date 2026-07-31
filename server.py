@@ -27,19 +27,27 @@ import csv
 import functools
 import io
 import os
+import re
+import secrets
+import shutil
 import socket
 import subprocess
 import tempfile
 import threading
+import time
 import webbrowser
+from collections import OrderedDict
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
 from flask import Flask, jsonify, render_template, request, Response, send_file
 
+import bedrock_world
 import db
 import image_validate
+import mcworld_convert
+import mcworld_preview
 import origin_scan
 import schem_convert
 import thumbs
@@ -49,13 +57,14 @@ from glb_validate import validate_glb
 
 SCHEMATIC_EXTENSIONS = (".schem", ".schematic")
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")
+MCWORLD_EXTENSIONS = (".mcworld",)
 
 # Bumped whenever the JSON contract changes in a way the frontend depends on. Python loads
 # modules once at startup, but static/app.js is read from disk on every request -- so a
 # server left running while the code changes serves a NEW frontend against an OLD API. The
 # frontend checks this number and says so, instead of silently missing controls whose data
 # never arrived.
-API_VERSION = 3
+API_VERSION = 4
 
 # Everything a build can have a picture of. Whitelisted rather than interpolated: the
 # thumbnail route is the only one that reaches into data/builds/, and the path it builds
@@ -82,6 +91,9 @@ TMP_DIR.mkdir(parents=True, exist_ok=True)
 # machines. On a fresh clone it doesn't exist yet, and after a `git pull` it hasn't seen
 # the folders that arrived -- so reconcile it with the disk before serving anything.
 STARTUP_SYNC = db.sync_from_disk_if_needed()
+
+# World imports stash their upload until a region is chosen; sweep any that were abandoned.
+(TMP_DIR / "mcworld").mkdir(parents=True, exist_ok=True)
 
 
 # ── Upload helpers ────────────────────────────────────────────────────────────
@@ -264,6 +276,266 @@ def api_get_build(build_id: int):
     if build is None:
         return jsonify(error="Build not found."), 404
     return jsonify(build=build)
+
+
+# ── API: Bedrock world import ─────────────────────────────────────────────────
+# A .mcworld holds a whole world, not a build, so importing takes two steps rather than
+# one: upload and look at it, then pick the region that is actually the build. The upload
+# is stashed under a token between the two so a large world isn't sent twice, and the
+# parsed world is cached in memory so choosing a region stays instant.
+
+WORLD_DIR = TMP_DIR / "mcworld"
+_TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
+# Parsed worlds, keyed by token. A world is tens of MB parsed, and the whole point of the
+# token is that you are mid-import on exactly one of them.
+_world_cache: "OrderedDict[str, object]" = OrderedDict()
+_WORLD_CACHE_MAX = 3
+_world_lock = threading.Lock()
+# How long an abandoned upload lingers before the next startup sweeps it.
+WORLD_TTL_SECONDS = 24 * 3600
+
+
+def _world_path(token: str) -> Path:
+    """Path for a token's stashed upload. The token is validated, never joined blindly."""
+    if not _TOKEN_RE.match(token or ""):
+        raise ValueError("bad token")
+    return WORLD_DIR / token / "world.mcworld"
+
+
+def _sweep_world_uploads() -> int:
+    """Delete stashed uploads left behind by imports that were never finished."""
+    removed = 0
+    try:
+        cutoff = time.time() - WORLD_TTL_SECONDS
+        for folder in WORLD_DIR.iterdir():
+            if folder.is_dir() and folder.stat().st_mtime < cutoff:
+                shutil.rmtree(folder, ignore_errors=True)
+                removed += 1
+    except OSError:
+        pass
+    return removed
+
+
+def _load_world(token: str):
+    """The parsed world for a token, from cache or by reading the stashed upload."""
+    with _world_lock:
+        cached = _world_cache.get(token)
+        if cached is not None:
+            _world_cache.move_to_end(token)
+            return cached
+    path = _world_path(token)
+    if not path.exists():
+        return None
+    world = bedrock_world.open_world(path)
+    with _world_lock:
+        _world_cache[token] = world
+        while len(_world_cache) > _WORLD_CACHE_MAX:
+            _world_cache.popitem(last=False)
+    return world
+
+
+def _forget_world(token: str) -> None:
+    with _world_lock:
+        _world_cache.pop(token, None)
+    try:
+        shutil.rmtree(_world_path(token).parent, ignore_errors=True)
+    except ValueError:
+        pass
+
+
+def _is_mcworld_filename(name) -> bool:
+    return str(name or "").lower().endswith(MCWORLD_EXTENSIONS)
+
+
+def _bbox_from(payload: dict) -> dict:
+    """Read a bounding box out of a request body, rejecting anything non-numeric."""
+    try:
+        return {key: int(payload[key]) for key in
+                ("min_x", "max_x", "min_y", "max_y", "min_z", "max_z")}
+    except (KeyError, TypeError, ValueError):
+        raise _ImageRejected("A region needs min_x/max_x, min_y/max_y and min_z/max_z.")
+
+
+def _preview_bounds(world) -> dict:
+    """The X/Z frame the preview map covers.
+
+    Framed on what was built, not the world's full extent: a world is mostly empty terrain,
+    and framing on all of it would shrink the part you actually need to click on. Returned
+    with the inspect response so the client can turn a click into world coordinates.
+    """
+    padding = 12
+    bounds = dict(world.world_bounds())
+    auto = world.auto_bbox()
+    if auto:
+        bounds.update(min_x=auto["min_x"] - padding, max_x=auto["max_x"] + padding,
+                      min_z=auto["min_z"] - padding, max_z=auto["max_z"] + padding)
+    return bounds
+
+
+def _region_dims(bbox: dict) -> dict:
+    width = abs(bbox["max_x"] - bbox["min_x"]) + 1
+    height = abs(bbox["max_y"] - bbox["min_y"]) + 1
+    length = abs(bbox["max_z"] - bbox["min_z"]) + 1
+    volume = width * height * length
+    return {"w": width, "h": height, "l": length, "longest": max(width, height, length),
+            "dims": "{}x{}x{}".format(width, height, length), "volume": volume,
+            "max_volume": schem_convert.MAX_VOLUME, "too_big": volume > schem_convert.MAX_VOLUME}
+
+
+@app.post("/api/mcworld/inspect")
+def api_mcworld_inspect():
+    """Take a .mcworld, parse it, and report what's in it plus where the build looks to be.
+
+    Saves nothing to the library -- this is the world equivalent of /api/inspect.
+    """
+    f = request.files.get("world")
+    if f is None or not f.filename:
+        return jsonify(error="No file provided."), 400
+    if not _is_mcworld_filename(f.filename):
+        return jsonify(error="Expected a .mcworld file."), 400
+
+    token = secrets.token_hex(16)
+    folder = WORLD_DIR / token
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / "world.mcworld"
+    try:
+        f.save(str(target))
+        world = bedrock_world.open_world(target)
+    except bedrock_world.WorldError as exc:
+        shutil.rmtree(folder, ignore_errors=True)
+        return jsonify(filename=f.filename, **exc.details()), 400
+    except Exception:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+
+    with _world_lock:
+        _world_cache[token] = world
+        while len(_world_cache) > _WORLD_CACHE_MAX:
+            _world_cache.popitem(last=False)
+
+    bounds = world.world_bounds()
+    auto = world.auto_bbox()
+    if auto is None:
+        _forget_world(token)
+        return jsonify(error="This world has no buildings in it -- only terrain.",
+                       code="nothing_built", stage="mcworld"), 400
+
+    return jsonify(
+        token=token, filename=f.filename, level_name=world.level_name,
+        subchunks=len(world.subchunks), bounds=bounds, auto_bbox=auto,
+        map_bounds=_preview_bounds(world), suggested=_region_dims(auto),
+        preview="/api/mcworld/{}/preview.png".format(token))
+
+
+@app.get("/api/mcworld/<token>/preview.png")
+def api_mcworld_preview(token: str):
+    """Top-down map of the world, with the auto-detected build area outlined."""
+    try:
+        world = _load_world(token)
+    except ValueError:
+        return jsonify(error="Unknown import."), 404
+    except bedrock_world.WorldError as exc:
+        return jsonify(**exc.details()), 400
+    if world is None:
+        return jsonify(error="That import has expired. Drop the world again."), 404
+
+    auto = world.auto_bbox()
+    bounds = _preview_bounds(world)
+
+    image = mcworld_preview.render_world_map(world, bounds, highlight=auto)
+    if image is None:
+        return jsonify(error="Nothing to preview."), 404
+
+    buffer = io.BytesIO()
+    image.save(buffer, "PNG", optimize=True)
+    buffer.seek(0)
+    response = Response(buffer.getvalue(), mimetype="image/png")
+    # The map covers a fixed area of a stashed upload, so it can't change under the token.
+    response.headers["X-Map-Bounds"] = "{},{},{},{}".format(
+        bounds["min_x"], bounds["min_z"], bounds["max_x"], bounds["max_z"])
+    return response
+
+
+@app.post("/api/mcworld/<token>/region")
+def api_mcworld_region(token: str):
+    """Dimensions and block count for a candidate region, without converting anything."""
+    try:
+        world = _load_world(token)
+    except ValueError:
+        return jsonify(error="Unknown import."), 404
+    if world is None:
+        return jsonify(error="That import has expired. Drop the world again."), 404
+    try:
+        bbox = _bbox_from(request.get_json(silent=True) or {})
+    except _ImageRejected as exc:
+        return jsonify(error=exc.reason), 400
+    return jsonify(bbox=bbox, **_region_dims(bbox))
+
+
+@app.post("/api/mcworld/<token>/save")
+def api_mcworld_save(token: str):
+    """Convert the chosen region to a .schem and add it to the library."""
+    try:
+        world = _load_world(token)
+    except ValueError:
+        return jsonify(error="Unknown import."), 404
+    if world is None:
+        return jsonify(error="That import has expired. Drop the world again."), 404
+
+    payload = request.get_json(silent=True) or {}
+    try:
+        bbox = _bbox_from(payload)
+    except _ImageRejected as exc:
+        return jsonify(error=exc.reason), 400
+
+    name = (payload.get("name") or "").strip()
+    source_note = (payload.get("source_note") or "").strip()
+    allow_duplicate = _truthy(payload.get("allow_duplicate", False))
+
+    tmp = None
+    try:
+        grid, names = world.extract_region(bbox)
+        fd, tmp_name = tempfile.mkstemp(dir=str(TMP_DIR), suffix=".schem")
+        os.close(fd)
+        tmp = Path(tmp_name)
+        info = mcworld_convert.region_to_schem(grid, names, tmp)
+
+        # Conversion warnings belong with the build, the way the legacy .schematic path
+        # records what it could not carry across.
+        note = source_note
+        if info["warnings"]:
+            joined = " ".join(info["warnings"])
+            note = (note + "  " + joined).strip() if note else joined
+
+        schem_hash = sha256_file(tmp)
+        try:
+            row = db.create_build(name, note, tmp, schem_hash,
+                                  (info["width"], info["height"], info["length"]),
+                                  allow_duplicate)
+        except db.DuplicateBuildError as exc:
+            return jsonify(error="duplicate", existing=exc.existing), 409
+        _warm_thumb(row, "schem")
+        return jsonify(build=row, warnings=info["warnings"],
+                       palette_size=info["palette_size"]), 201
+    except bedrock_world.WorldError as exc:
+        return jsonify(**exc.details()), 400
+    finally:
+        _cleanup(tmp)
+
+
+@app.delete("/api/mcworld/<token>")
+def api_mcworld_discard(token: str):
+    """Drop a stashed upload without importing anything from it."""
+    try:
+        _forget_world(token)
+    except ValueError:
+        return jsonify(error="Unknown import."), 404
+    return jsonify(discarded=True)
+
+
+# An import that was started and never finished leaves its upload behind; clear out any
+# that are older than the TTL. Done at import so it covers `flask run` as well.
+SWEPT_WORLDS = _sweep_world_uploads()
 
 
 # ── API: edit metadata ────────────────────────────────────────────────────────

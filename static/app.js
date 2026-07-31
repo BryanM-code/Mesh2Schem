@@ -132,6 +132,18 @@ const scanOrigins = (folder, apply) => api("/api/admin/scan-origins", {
   body: JSON.stringify({ folder, apply }),
 });
 const defaultDownloads = () => api("/api/admin/default-downloads");
+function inspectWorld(file) {
+  const fd = new FormData();
+  fd.append("world", file);
+  return api("/api/mcworld/inspect", { method: "POST", body: fd });
+}
+const worldRegion = (token, bbox) => api("/api/mcworld/" + token + "/region", {
+  method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(bbox),
+});
+const worldSave = (token, payload) => api("/api/mcworld/" + token + "/save", {
+  method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+});
+const worldDiscard = (token) => api("/api/mcworld/" + token, { method: "DELETE" });
 
 // ── Server freshness ──────────────────────────────────────────────────────────
 // This file is served from disk on every request, but the Python behind it is loaded once
@@ -196,6 +208,11 @@ function wireDrop(zone, { accept, multiple = false, onFiles }) {
 const SCHEMATIC_EXT = /\.(schem|schematic)$/i;
 const isSchematic = (file) => SCHEMATIC_EXT.test(file.name);
 const schematicBaseName = (name) => name.replace(SCHEMATIC_EXT, "");
+
+// A .mcworld is a Bedrock world export — a whole world, not a build — so it takes a
+// different path: parse it, show a map, and cut the region you actually want out of it.
+const MCWORLD_EXT = /\.mcworld$/i;
+const isMcworld = (file) => MCWORLD_EXT.test(file.name);
 
 // ── Small shared bits ─────────────────────────────────────────────────────────
 function chip(k, v) { return h("span", { class: "chip" }, h("span", { class: "k" }, k), h("b", {}, v)); }
@@ -368,15 +385,28 @@ function viewAdd() {
   mount(root);
   const work = root.querySelector("#add-work");
   wireDrop(root.querySelector('[data-drop="schem"]'), {
-    accept: ".schem,.schematic", multiple: true,
+    accept: ".schem,.schematic,.mcworld", multiple: true,
     onFiles: (files) => handleAddFiles(files, work),
   });
 }
 
 function handleAddFiles(files, work) {
+  // A world export is a different kind of thing from a schematic — it holds many builds —
+  // so it gets its own flow rather than being batched alongside them.
+  const worlds = files.filter(isMcworld);
+  if (worlds.length) {
+    if (files.length > worlds.length || worlds.length > 1) {
+      toast("Importing one world at a time.", "err");
+    }
+    renderWorldImport(worlds[0], work);
+    return;
+  }
   const schems = files.filter(isSchematic);
   const ignored = files.length - schems.length;
-  if (schems.length === 0) { toast("No .schem or .schematic files in that drop.", "err"); return; }
+  if (schems.length === 0) {
+    toast("No .schem, .schematic or .mcworld files in that drop.", "err");
+    return;
+  }
   if (ignored > 0) toast("Ignored " + ignored + " file(s) that aren’t schematics.", "err");
   if (schems.length === 1) renderSingleAdd(schems[0], work);
   else renderBatchAdd(schems, work);
@@ -435,6 +465,194 @@ function renderSingleForm(card, file, defaultName, info) {
         }
       });
   });
+}
+
+// ── Add: Bedrock world import ─────────────────────────────────────────────────
+// A .mcworld holds a whole world. Importing it means looking at a map of it and cutting
+// out the part that is one build — the world this was built against is a neighbourhood of
+// four houses, and importing all of it at once would be both over the size limit and a
+// poor training example.
+function renderWorldImport(file, work) {
+  const card = h("div", { class: "card" },
+    h("div", {}, h("span", { class: "spin" }), " Reading “" + file.name + "”… ",
+      h("span", { class: "muted" }, "a world takes a moment")));
+  work.replaceChildren(card);
+
+  inspectWorld(file)
+    .then((info) => renderWorldPicker(card, file, info))
+    .catch((err) => card.replaceChildren(errorNotice(err, "Could not read that world.")));
+}
+
+function renderWorldPicker(card, file, info) {
+  const bounds = info.map_bounds;
+  const mapWidth = bounds.max_x - bounds.min_x + 1;
+  const mapLength = bounds.max_z - bounds.min_z + 1;
+  // Start on what the server detected as built; it's almost always the right ballpark.
+  const box = Object.assign({}, info.auto_bbox);
+  delete box.blocks;
+
+  const image = h("img", { class: "world-map", src: info.preview, alt: "Map of the world" });
+  const marquee = h("div", { class: "world-marquee" });
+  const stage = h("div", { class: "world-stage" }, image, marquee);
+  const readout = h("div", { class: "world-readout" });
+  const nameInput = h("input", { class: "input", type: "text",
+    value: (info.level_name || file.name.replace(MCWORLD_EXT, "")) });
+  const noteInput = h("textarea", { class: "input", rows: "2",
+    placeholder: "e.g. source URL … / licence note" });
+  const saveBtn = h("button", { class: "btn" }, "Save this region as a build");
+  const resetBtn = h("button", { class: "btn btn-ghost btn-sm" }, "Reset to detected area");
+  const cancelBtn = h("button", { class: "btn btn-ghost" }, "Cancel");
+
+  const fields = {};
+  const number = (key, label) => {
+    const input = h("input", { class: "input input-num", type: "number", value: box[key] });
+    input.addEventListener("input", () => {
+      const value = parseInt(input.value, 10);
+      if (!isNaN(value)) { box[key] = value; refresh(false); }
+    });
+    fields[key] = input;
+    return h("label", { class: "f-axis" }, label, input);
+  };
+
+  // Screen position -> world coordinate. The map is a plan view, so this is a straight
+  // linear map from the image's pixel box onto the world box it covers.
+  const toWorld = (event) => {
+    const rect = image.getBoundingClientRect();
+    const fx = Math.min(Math.max((event.clientX - rect.left) / rect.width, 0), 0.9999);
+    const fz = Math.min(Math.max((event.clientY - rect.top) / rect.height, 0), 0.9999);
+    return {
+      x: bounds.min_x + Math.floor(fx * mapWidth),
+      z: bounds.min_z + Math.floor(fz * mapLength),
+    };
+  };
+
+  let dragStart = null;
+  stage.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    dragStart = toWorld(e);
+    stage.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+  stage.addEventListener("pointermove", (e) => {
+    if (!dragStart) return;
+    const now = toWorld(e);
+    box.min_x = Math.min(dragStart.x, now.x); box.max_x = Math.max(dragStart.x, now.x);
+    box.min_z = Math.min(dragStart.z, now.z); box.max_z = Math.max(dragStart.z, now.z);
+    refresh(true);
+  });
+  const endDrag = (e) => {
+    if (!dragStart) return;
+    dragStart = null;
+    try { stage.releasePointerCapture(e.pointerId); } catch (_) { /* already gone */ }
+    refresh(false);
+  };
+  stage.addEventListener("pointerup", endDrag);
+  stage.addEventListener("pointercancel", endDrag);
+
+  function drawMarquee() {
+    const left = ((box.min_x - bounds.min_x) / mapWidth) * 100;
+    const top = ((box.min_z - bounds.min_z) / mapLength) * 100;
+    const w = ((box.max_x - box.min_x + 1) / mapWidth) * 100;
+    const l = ((box.max_z - box.min_z + 1) / mapLength) * 100;
+    marquee.style.left = left + "%";
+    marquee.style.top = top + "%";
+    marquee.style.width = w + "%";
+    marquee.style.height = l + "%";
+  }
+
+  // While dragging, size is computed locally so the readout tracks the pointer; on release
+  // the server confirms it. Same arithmetic either way — the round trip is what validates.
+  function showDims(dims) {
+    const over = dims.too_big;
+    readout.replaceChildren(
+      h("span", { class: "world-dims" + (over ? " over" : "") }, dims.dims),
+      h("span", { class: "muted" }, "  " + dims.volume.toLocaleString() + " blocks"),
+      over ? h("span", { class: "world-over" },
+        "  over the " + dims.max_volume.toLocaleString() + "-block limit — select a smaller area")
+        : null);
+    saveBtn.disabled = over;
+  }
+
+  function localDims() {
+    const w = Math.abs(box.max_x - box.min_x) + 1;
+    const hgt = Math.abs(box.max_y - box.min_y) + 1;
+    const l = Math.abs(box.max_z - box.min_z) + 1;
+    const volume = w * hgt * l;
+    return { dims: w + "x" + hgt + "x" + l, volume: volume,
+             max_volume: info.suggested.max_volume, too_big: volume > info.suggested.max_volume };
+  }
+
+  let pending = null;
+  function refresh(localOnly) {
+    ["min_x", "max_x", "min_y", "max_y", "min_z", "max_z"].forEach((key) => {
+      if (fields[key] && document.activeElement !== fields[key]) fields[key].value = box[key];
+    });
+    drawMarquee();
+    showDims(localDims());
+    if (localOnly) return;
+    clearTimeout(pending);
+    pending = setTimeout(() => {
+      worldRegion(info.token, box).then(showDims).catch(() => { /* keep the local estimate */ });
+    }, 150);
+  }
+
+  resetBtn.addEventListener("click", () => {
+    Object.assign(box, info.auto_bbox);
+    delete box.blocks;
+    refresh(false);
+  });
+  cancelBtn.addEventListener("click", () => {
+    worldDiscard(info.token).catch(() => {});
+    card.remove();
+  });
+
+  saveBtn.addEventListener("click", () => {
+    saveBtn.disabled = cancelBtn.disabled = true;
+    saveBtn.replaceChildren(h("span", { class: "spin" }), " Converting…");
+    worldSave(info.token, Object.assign({}, box, {
+      name: nameInput.value, source_note: noteInput.value,
+    }))
+      .then((res) => {
+        const b = res.build;
+        card.replaceChildren(h("div", { class: "notice notice-ok" },
+          "Saved “" + b.name + "” (#" + b.id + ") — " + b.dims + ".  ",
+          h("a", { href: "#build/" + b.id }, "Open"), " · ",
+          h("a", { href: "#library" }, "View library")));
+        toast("Imported “" + b.name + "”", "ok");
+      })
+      .catch((err) => {
+        saveBtn.disabled = cancelBtn.disabled = false;
+        saveBtn.replaceChildren(document.createTextNode("Save this region as a build"));
+        if (err.status === 409 && err.data && err.data.existing) {
+          card.insertBefore(dupNotice(err.data.existing,
+            "This exact region is already in the library."), readout);
+        } else {
+          card.append(errorNotice(err, "Could not import that region."));
+        }
+      });
+  });
+
+  card.replaceChildren(
+    h("div", { class: "chips" },
+      h("span", { class: "chip" }, h("span", { class: "k" }, "world"),
+        h("b", {}, (bounds.max_x - bounds.min_x + 1) + "x" + (bounds.max_z - bounds.min_z + 1))),
+      chip("Subchunks", info.subchunks.toLocaleString()),
+      chip("Built blocks", info.auto_bbox.blocks.toLocaleString())),
+    h("p", { class: "panel-sub" },
+      "Drag on the map to select one build. The blue box is what looked built when the "
+      + "world was read — a whole neighbourhood here, so narrow it to a single house."),
+    stage,
+    h("div", { class: "world-controls" },
+      number("min_x", "X"), number("max_x", "→"),
+      number("min_z", "Z"), number("max_z", "→"),
+      number("min_y", "Y"), number("max_y", "→"),
+      resetBtn),
+    readout,
+    h("div", { class: "field" }, h("label", {}, "Name"), nameInput),
+    h("div", { class: "field" }, h("label", {}, "Source / notes (optional)"), noteInput),
+    h("div", { class: "row-actions" }, saveBtn, cancelBtn));
+
+  refresh(false);
 }
 
 function renderBatchAdd(files, work) {

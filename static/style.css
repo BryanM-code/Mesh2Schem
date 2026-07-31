@@ -341,6 +341,32 @@ textarea { resize: vertical; min-height: 58px; }
 .scan-results .existing-list { margin-top: 8px; font-size: 12.5px; }
 .scan-results .existing-list a { word-break: break-all; }
 
+/* ── Bedrock world import ────────────────────────────────── */
+/* A plan view of the world with a draggable selection over it. The map is pixel art at
+   block resolution, so it must not be smoothed on the way up. */
+.world-stage {
+  position: relative; display: inline-block; margin: 4px 0 12px;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  overflow: hidden; cursor: crosshair; touch-action: none; line-height: 0;
+  background: #0b1017; max-width: 100%;
+}
+.world-map {
+  display: block; max-width: 100%; height: auto;
+  image-rendering: pixelated; image-rendering: crisp-edges;
+  user-select: none; -webkit-user-drag: none;
+}
+.world-marquee {
+  position: absolute; pointer-events: none;
+  border: 2px solid var(--accent); background: rgba(88,166,255,.16);
+  box-shadow: 0 0 0 9999px rgba(6,10,16,.45);
+}
+.world-controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.world-controls .input-num { width: 84px; }
+.world-readout { margin-bottom: 14px; font-size: 13.5px; }
+.world-dims { font-family: var(--mono); font-size: 15px; font-weight: 600; }
+.world-dims.over { color: var(--red); }
+.world-over { color: var(--red); font-size: 12.5px; }
+
 /* ── Batch add list ──────────────────────────────────────── */
 .batch { margin-top: 18px; }
 .batch-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
