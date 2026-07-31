@@ -1,0 +1,5 @@
+Flask>=3.0
+nbtlib==2.0.4
+numpy>=1.24
+Pillow>=10.0
+trimesh==4.12.2

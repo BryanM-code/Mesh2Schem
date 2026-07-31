@@ -1,0 +1,32 @@
+# Line-ending handling, which matters a great deal here: this repo carries a dataset of
+# binary files and is cloned between Windows and macOS. If git ever decided a .schem was
+# text it would rewrite CRLF on checkout and corrupt it, and the corruption would only
+# surface later as an unreadable build. Git's own binary detection would usually catch it,
+# but "usually" is not a guarantee worth taking with the data.
+
+# Source and docs: normalise to LF in the repo, check out native. Safe and diffable.
+*.py      text eol=lf
+*.js      text eol=lf
+*.css     text eol=lf
+*.html    text eol=lf
+*.md      text eol=lf
+*.txt     text eol=lf
+*.json    text eol=lf
+.gitignore     text eol=lf
+.gitattributes text eol=lf
+
+# The library. Byte-for-byte, always -- content hashes depend on it.
+*.schem     binary
+*.schematic binary
+*.glb       binary
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.webp      binary
+*.db        binary
+
+# Belt and braces: anything under the data folder that isn't named above is left alone
+# rather than guessed at. meta.json is re-listed as text so it stays readable in diffs
+# and merges per-build, which is the whole reason it exists.
+data/builds/**            -text
+data/builds/**/meta.json  text eol=lf

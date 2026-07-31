@@ -1,0 +1,26 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# The library's FILES are tracked (data/builds/) so they travel between machines --
+# that is the point of the repo. See "Working from two machines" in the README.
+
+# The database is NOT tracked, deliberately. It is binary, so git cannot merge two
+# machines' changes to it; and it is derivable, so it does not need to be. Everything the
+# user typed is mirrored into each build's meta.json, and the app rebuilds the database
+# from data/builds/ on startup whenever the two disagree.
+data/collector.db
+data/collector.db-wal
+data/collector.db-shm
+
+# Scratch space for in-flight uploads.
+data/.tmp/
+
+# Thumbnails are a derived cache: re-rendered on demand from the files beside them.
+# Tracking them would mean a binary conflict every time an artefact changed.
+data/builds/*/thumb/
+
+# Temp file written by the conversion step during an origin scan.
+*.originscan.schem
