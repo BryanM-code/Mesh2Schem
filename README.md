@@ -76,11 +76,12 @@ automatically on first run. Press `Ctrl+C` to stop.
 | Variable | Default | What it does |
 | --- | --- | --- |
 | `BDC_PORT` | `5000` | Port to listen on. |
-| `BDC_HOST` | `127.0.0.1` | Bind address. Set to `tailscale` to reach it from your other devices — see [Using it from another machine](#using-it-from-another-machine-mac-laptop-tablet). |
+| `BDC_HOST` | `127.0.0.1` | Bind address. `tailscale` binds to this machine's Tailscale address; `0.0.0.0` listens everywhere. |
+| `BDC_MACHINE_ID` | `0` | Which block of build ids this machine allocates from. Set to `1` on the second machine — see [Working from two machines](#working-from-two-machines). |
 
 ```powershell
 $env:BDC_PORT = "5050"        # different port
-$env:BDC_HOST = "tailscale"   # reachable from your Mac / laptop
+$env:BDC_MACHINE_ID = "1"     # on the second machine only
 ```
 
 **Changing any Python file needs a restart** — see
@@ -389,97 +390,133 @@ schem, reconciles the screenshot slots against `shots/`, and derives status from
 user-entered name, notes and source URL; it **never deletes** any row or file. The same
 action is available in the app via the **Rebuild from disk** button on the Library page.
 
-## Using it from another machine (Mac, laptop, tablet)
+## Working from two machines
 
-**Serve it, don't sync it.** The desktop keeps the one database and the one copy of the
-files; everything else just points a browser at it. You get the same app, and there is
-nothing to reconcile.
-
-### Why not just sync the `data/` folder?
-
-Two reasons, both of which cost you data rather than just being awkward:
-
-**1. Build ids collide silently.** Ids come from SQLite `AUTOINCREMENT` and are baked into
-folder names (`data/builds/<id>__<slug>`). Add a build on each machine while they're apart
-and both mint id 1. Sync the folders together and you get `1__house` and `1__tower`, and
-rebuild-from-disk quietly resolves the clash by overwriting:
+The repo carries the library. Clone it on the other machine, run the app, and you have the
+same builds — add, edit and delete from either, commit, and pull on the other side.
 
 ```
-folders after sync: ['1__house', '1__tower']
-rebuild summary:    {'added': 1, 'updated': 1, 'skipped': []}
-rows:               [(1, 'house')]        # one build survived; no warning
+PC                              Mac
+──                              ───
+git pull                        git clone <your repo>
+…add builds…                    python3 -m venv .venv && pip install -r requirements.txt
+git add -A                      export BDC_MACHINE_ID=1     ← once, see below
+git commit -m "…"               .venv/bin/python server.py
+git push                        …add builds…
+                                git add -A && git commit && git push
 ```
 
-The surviving row keeps one build's name but the other's hash, dimensions and paths. The
-design assumes a single writer.
+### Setting up the Mac (once)
 
-**2. The database can't be copied while it's in use.** SQLite runs in WAL mode, so a live
-database is three files — `collector.db`, `-wal`, `-shm`. Dropbox/iCloud/OneDrive upload
-files independently, so the other machine can get a `.db` from one moment and a `-wal`
-from another. That is a *corrupt* database, not a stale one. (`-shm` is shared memory and
-meaningless to copy at all.)
+```bash
+git clone <your repo> BuildDataCollector
+cd BuildDataCollector
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 
-### Setup: Tailscale (~5 minutes, free)
-
-Tailscale is a private network between your own devices — encrypted end-to-end, works from
-anywhere, no ports forwarded and nothing exposed to the internet.
-
-1. Install it on **both** machines from [tailscale.com/download](https://tailscale.com/download)
-   and sign in with the same account.
-2. On the **Windows PC**, start the server bound to its Tailscale address:
-
-   ```powershell
-   $env:BDC_HOST = "tailscale"
-   .venv\Scripts\python server.py
-   ```
-
-   It prints the address to use:
-
-   ```
-   BuildDataCollector  ->  http://100.x.y.z:5000
-     listening on 100.x.y.z  (Tailscale — reachable from your other Tailscale devices only)
-   ```
-
-3. On the **Mac**, open that `http://100.x.y.z:5000` in a browser. That's it — same app,
-   same library, adds and deletes land in the one database.
-
-Windows Firewall may prompt the first time; allow it on private networks. If you dismissed
-the prompt:
-
-```powershell
-New-NetFirewallRule -DisplayName "BuildDataCollector" -Direction Inbound `
-  -Protocol TCP -LocalPort 5000 -Action Allow -Profile Private
+echo 'export BDC_MACHINE_ID=1' >> ~/.zshrc   # so it sticks; see "machine ids" below
+export BDC_MACHINE_ID=1
+.venv/bin/python server.py
 ```
 
-### Where it listens
+There is no database in the repo, so the first run builds one from the folders it cloned —
+you'll see `synced from data/builds/: N added` in the startup banner.
 
-`BDC_HOST` controls the bind address; `BDC_PORT` the port (default 5000).
+### What is and isn't in the repo
 
-| `BDC_HOST` | Listens on | Who can reach it |
+| | Tracked? | Why |
 | --- | --- | --- |
-| *unset* / `127.0.0.1` | loopback | this machine only — **the default** |
-| `tailscale` | your Tailscale address | your signed-in devices, from anywhere |
-| `100.x.y.z` | that address | same, pinned explicitly |
-| `0.0.0.0` | every interface | **everyone on every network you join** |
+| `data/builds/**` | **yes** | the library itself: schematics, screenshots, images, meshes |
+| `data/builds/*/meta.json` | **yes** | the names, notes and source URLs you typed |
+| `data/collector.db` | no | binary — git cannot merge two machines' changes to it |
+| `data/builds/*/thumb/` | no | a derived cache, re-rendered on demand |
+| `.venv/` | no | per-machine, and platform-specific |
 
-**This app has no login.** Anyone who can reach the address can add, edit and delete
-builds — so the interface it listens on *is* the access control. That's why `tailscale` is
-the recommendation and `127.0.0.1` is the default: prefer them over `0.0.0.0`, which
-includes whatever café wifi the machine is on. The startup banner says which case you're in,
-and `BDC_HOST=tailscale` fails with instructions rather than falling back to something wider
-if Tailscale isn't up.
+**The database is derived, so it doesn't need syncing.** It is rebuilt from the folders
+whenever the two disagree — on a fresh clone, and after any pull that brought builds in or
+took them away. That happens automatically at startup; the **Rebuild from disk** button
+does the same thing on demand.
 
-Keyboard hints in the UI follow the machine you're *browsing* from, so the Mac is told
-`Ctrl+Cmd+Shift+4` / `Cmd+V` while the PC is told `Win+Shift+S` / `Ctrl+V`.
+### `meta.json`: why it exists
 
-### If the desktop won't be on
+`name`, `source_note`, `source_url`, `variant_no` and `added_at` are things *you typed* —
+nothing about the files implies them. They used to live only in the database, which meant a
+clone would rebuild every build as `name=<folder slug>` with blank notes and no source URL.
 
-Then you need a genuinely offline copy, and the two problems above become real work rather
-than something to avoid: sync **`data/builds/` only** (never the database) with
-[Syncthing](https://syncthing.net) — direct machine-to-machine, no cloud, and no "files on
-demand" placeholders to break local reads — run `rebuild_from_disk.py` on each machine to
-re-derive its own database, and give each machine a disjoint id range so folder names can't
-collide. That last part is not implemented; ask and it can be.
+So each build folder carries a small `meta.json`:
+
+```json
+{
+  "added_at": "2026-07-27T22:33:00+00:00",
+  "name": "suburbanhouse310695835",
+  "source_note": "Converted from legacy MCEdit .schematic.",
+  "source_url": "https://www.planetminecraft.com/",
+  "variant_no": 0
+}
+```
+
+It is written whenever you change any of those fields, and read back when the database is
+rebuilt. Being one small text file *per build* is the point: two machines editing different
+builds merge cleanly, where one shared binary database could only conflict.
+
+### Machine ids: why the Mac needs `BDC_MACHINE_ID=1`
+
+Build ids are baked into folder names (`data/builds/<id>__<slug>`). Two machines each
+counting from 1 would both create `1__something`, and merging those folders means two
+different builds claiming the same id — which used to resolve by silently overwriting one
+with the other.
+
+Each machine therefore allocates from its own block of a million:
+
+| `BDC_MACHINE_ID` | Ids it creates |
+| --- | --- |
+| unset / `0` | 1, 2, 3, … — **the PC, unchanged** |
+| `1` | 1000001, 1000002, … |
+| `2` | 2000001, … |
+
+Set it once on every machine after the first. The startup banner prints it whenever it
+isn't 0, so you can see at a glance which machine you're on. Forgetting it is the one way
+to reintroduce collisions, which is why it's in the banner rather than buried in a config
+file.
+
+### Merge conflicts
+
+Because builds are separate folders and metadata is one small file each, the normal case —
+two machines adding *different* builds — merges with no conflict at all. Conflicts are
+possible if you edit *the same build* on both machines without pulling in between; git will
+say so, and for a binary file you pick a side:
+
+```bash
+git checkout --theirs data/builds/5__house/image/generated.png   # take the incoming one
+git checkout --ours   data/builds/5__house/image/generated.png   # keep yours
+git add data/builds/5__house/image/generated.png
+```
+
+The habit that avoids it: **pull before you start, push when you stop.**
+
+### Repo size
+
+Schematics are a few KB and screenshots a few hundred KB, but TRELLIS meshes run to tens of
+MB, and git keeps every version of every file forever. That's fine for a while; if the repo
+gets uncomfortable, the usual answer is Git LFS. GitHub also rejects any single file over
+100 MB, which a `.glb` could eventually hit.
+
+### Line endings
+
+`.gitattributes` marks every data file `binary`. This matters more than it looks: cloning
+between Windows and macOS, a `.schem` treated as text would have its line endings rewritten
+on checkout and be silently corrupted — and the damage would only surface later as an
+unreadable build. Verified: a schematic's sha256 is identical before and after a round trip
+through clone.
+
+### If you'd rather not sync at all
+
+One machine can serve the app to the other instead, with no repo and nothing to reconcile:
+set `BDC_HOST` (see [Run](#run)) so it listens beyond loopback, and open it from the Mac's
+browser. **The app has no login**, so the interface it listens on is its access control:
+`0.0.0.0` means everyone on whatever network you're on. `BDC_HOST=tailscale` binds to a
+[Tailscale](https://tailscale.com) address, reachable by your own devices from anywhere and
+nobody else — but that needs Tailscale installed on both machines.
 
 ## Restart after changing Python code
 
@@ -558,9 +595,9 @@ suite still passes off Windows.
 
 ## Notes
 
-- Single local user; no accounts, no auth. This is a personal utility. To reach it from
-  another machine, put it on Tailscale rather than opening it up — see
-  [Using it from another machine](#using-it-from-another-machine-mac-laptop-tablet).
+- Single local user; no accounts, no auth. This is a personal utility. To use it from a
+  second machine, clone the repo — see
+  [Working from two machines](#working-from-two-machines).
 - Scope is intentionally narrow: capture and pair files with clean metadata. Block-ID
   mapping exists only to convert legacy `.schematic` files into `.schem`; the rendering
   here exists only to make thumbnails. **There is no training logic, and nothing calls
