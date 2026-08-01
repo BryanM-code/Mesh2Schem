@@ -367,6 +367,9 @@ textarea { resize: vertical; min-height: 58px; }
 .world-dims.over { color: var(--red); }
 .world-over { color: var(--red); font-size: 12.5px; }
 
+.recrop > summary { cursor: pointer; font-size: 12.5px; margin: 6px 0; }
+.recrop-body { margin-top: 10px; }
+
 /* ── Batch add list ──────────────────────────────────────── */
 .batch { margin-top: 18px; }
 .batch-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }

@@ -132,18 +132,21 @@ const scanOrigins = (folder, apply) => api("/api/admin/scan-origins", {
   body: JSON.stringify({ folder, apply }),
 });
 const defaultDownloads = () => api("/api/admin/default-downloads");
-function inspectWorld(file) {
+function inspectImport(file) {
   const fd = new FormData();
-  fd.append("world", file);
-  return api("/api/mcworld/inspect", { method: "POST", body: fd });
+  fd.append("file", file);
+  return api("/api/import/inspect", { method: "POST", body: fd });
 }
-const worldRegion = (token, bbox) => api("/api/mcworld/" + token + "/region", {
-  method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(bbox),
+const asJson = (body) => ({
+  method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
 });
-const worldSave = (token, payload) => api("/api/mcworld/" + token + "/save", {
-  method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
-});
-const worldDiscard = (token) => api("/api/mcworld/" + token, { method: "DELETE" });
+const importRegion = (token, bbox) => api("/api/import/" + token + "/region", asJson(bbox));
+const importSave = (token, payload) => api("/api/import/" + token + "/save", asJson(payload));
+const importSaveSchematics = (token) =>
+  api("/api/import/" + token + "/save-schematics", asJson({}));
+const importDiscard = (token) => api("/api/import/" + token, { method: "DELETE" });
+const sourceBounds = (id) => api("/api/builds/" + id + "/source-bounds");
+const recropBuild = (id, bbox) => api("/api/builds/" + id + "/recrop", asJson(bbox));
 
 // ── Server freshness ──────────────────────────────────────────────────────────
 // This file is served from disk on every request, but the Python behind it is loaded once
@@ -391,25 +394,21 @@ function viewAdd() {
 }
 
 function handleAddFiles(files, work) {
-  // A world export is a different kind of thing from a schematic — it holds many builds —
-  // so it gets its own flow rather than being batched alongside them.
-  const worlds = files.filter(isMcworld);
-  if (worlds.length) {
-    if (files.length > worlds.length || worlds.length > 1) {
-      toast("Importing one world at a time.", "err");
-    }
-    renderWorldImport(worlds[0], work);
+  // One file of any kind opens the region picker, so you can see what you are adding and
+  // trim it before it lands. Several at once stays the fast batch list — being walked
+  // through a picker twenty times would be worse than the slack it saves.
+  if (files.length === 1) {
+    renderImport(files[0], work);
     return;
   }
   const schems = files.filter(isSchematic);
   const ignored = files.length - schems.length;
   if (schems.length === 0) {
-    toast("No .schem, .schematic or .mcworld files in that drop.", "err");
+    toast("Drop one world or zip at a time, or several schematics together.", "err");
     return;
   }
-  if (ignored > 0) toast("Ignored " + ignored + " file(s) that aren’t schematics.", "err");
-  if (schems.length === 1) renderSingleAdd(schems[0], work);
-  else renderBatchAdd(schems, work);
+  if (ignored > 0) toast("Ignored " + ignored + " file(s) that are not schematics.", "err");
+  renderBatchAdd(schems, work);
 }
 
 function renderSingleAdd(file, work) {
@@ -467,133 +466,122 @@ function renderSingleForm(card, file, defaultName, info) {
   });
 }
 
-// ── Add: Bedrock world import ─────────────────────────────────────────────────
-// A .mcworld holds a whole world. Importing it means looking at a map of it and cutting
-// out the part that is one build — the world this was built against is a neighbourhood of
-// four houses, and importing all of it at once would be both over the size limit and a
-// poor training example.
-function renderWorldImport(file, work) {
+// ── Add: importing anything droppable ─────────────────────────────────────────
+// A schematic, a Bedrock world, a zipped Java world — all three hold blocks and all three
+// open the same picker, because the useful question is the same for each: which part of
+// this is the build? A zip that holds neither gets described rather than merely refused.
+function renderImport(file, work) {
   const card = h("div", { class: "card" },
     h("div", {}, h("span", { class: "spin" }), " Reading “" + file.name + "”… ",
       h("span", { class: "muted" }, "a world takes a moment")));
   work.replaceChildren(card);
 
-  inspectWorld(file)
-    .then((info) => renderWorldPicker(card, file, info))
-    .catch((err) => card.replaceChildren(errorNotice(err, "Could not read that world.")));
+  inspectImport(file)
+    .then((info) => {
+      if (info.kind === "zip_schematics") renderZipSchematics(card, file, info);
+      else renderRegionPicker(card, file, info);
+    })
+    .catch((err) => card.replaceChildren(unimportableNotice(err, file)));
 }
 
-function renderWorldPicker(card, file, info) {
+// A zip with no build in it is the case that used to be a dead end, so say what it does
+// hold — "not supported" is not something anyone can act on.
+function unimportableNotice(err, file) {
+  const data = (err && err.data) || {};
+  const wrap = h("div", {});
+  wrap.append(errorNotice(err, "Could not import “" + file.name + "”."));
+  if (data.contents && data.contents.length) {
+    const list = h("ul", { class: "existing-list" });
+    data.contents.forEach((name) => list.append(h("li", {}, name)));
+    wrap.append(h("div", { class: "notice notice-warn" },
+      h("strong", {}, "What’s actually in it: "), list));
+  }
+  if (data.worlds && data.worlds.length) {
+    wrap.append(h("div", { class: "notice notice-warn" },
+      "It holds a Bedrock world file — drop ", h("code", {}, data.worlds[0]),
+      " on its own instead."));
+  }
+  return wrap;
+}
+
+// A zip of schematics is several builds rather than one region, so it takes the batch
+// path; any of them can be cropped afterwards from its own build page.
+function renderZipSchematics(card, file, info) {
+  const list = h("ul", { class: "existing-list" });
+  info.schematics.forEach((s) =>
+    list.append(h("li", {}, s.name + "  ", h("span", { class: "muted" },
+      Math.round(s.size / 1024) + " KB"))));
+  const addAll = h("button", { class: "btn" },
+    "Add all " + info.schematics.length + " schematics");
+  const cancel = h("button", { class: "btn btn-ghost" }, "Cancel");
+
+  cancel.addEventListener("click", () => {
+    importDiscard(info.token).catch(() => {});
+    card.remove();
+  });
+  addAll.addEventListener("click", () => {
+    addAll.disabled = cancel.disabled = true;
+    addAll.replaceChildren(h("span", { class: "spin" }), " Adding…");
+    importSaveSchematics(info.token)
+      .then((res) => {
+        const parts = [h("strong", {}, "Added " + res.added.length + ". ")];
+        if (res.failed && res.failed.length) {
+          parts.push(res.failed.length + " skipped: "
+            + res.failed.map((f) => f.name + " (" + f.reason + ")").join(", ") + ". ");
+        }
+        parts.push(h("a", { href: "#library" }, "View library"));
+        card.replaceChildren(h("div", { class: "notice notice-ok" }, parts));
+        toast("Added " + res.added.length + " schematic(s).", "ok");
+      })
+      .catch((err) => {
+        addAll.disabled = cancel.disabled = false;
+        addAll.replaceChildren(document.createTextNode("Add all"));
+        card.append(errorNotice(err, "Could not add those."));
+      });
+  });
+
+  card.replaceChildren(
+    h("div", { class: "chips" }, chip("Zip", file.name),
+      chip("Schematics", info.schematics.length)),
+    h("p", { class: "panel-sub" },
+      "This zip holds schematics rather than a world, so they go in as a batch. "
+      + "Crop any of them afterwards from its build page."),
+    list,
+    h("div", { class: "row-actions" }, addAll, cancel));
+}
+
+// The picker itself: a map of the source with a draggable box over it.
+function renderRegionPicker(card, file, info) {
   const bounds = info.map_bounds;
   const mapWidth = bounds.max_x - bounds.min_x + 1;
   const mapLength = bounds.max_z - bounds.min_z + 1;
-  // Start on what the server detected as built; it's almost always the right ballpark.
   const box = Object.assign({}, info.auto_bbox);
   delete box.blocks;
 
-  const image = h("img", { class: "world-map", src: info.preview, alt: "Map of the world" });
+  const image = h("img", { class: "world-map", src: info.preview, alt: "Map of the source" });
   const marquee = h("div", { class: "world-marquee" });
   const stage = h("div", { class: "world-stage" }, image, marquee);
   const readout = h("div", { class: "world-readout" });
   const nameInput = h("input", { class: "input", type: "text",
-    value: (info.level_name || file.name.replace(MCWORLD_EXT, "")) });
+    value: (info.level_name || file.name.replace(/\.[^.]+$/, "")) });
   const noteInput = h("textarea", { class: "input", rows: "2",
     placeholder: "e.g. source URL … / licence note" });
   const saveBtn = h("button", { class: "btn" }, "Save this region as a build");
   const resetBtn = h("button", { class: "btn btn-ghost btn-sm" }, "Reset to detected area");
+  const wholeBtn = h("button", { class: "btn btn-ghost btn-sm" }, "Use everything");
   const cancelBtn = h("button", { class: "btn btn-ghost" }, "Cancel");
 
-  const fields = {};
-  const number = (key, label) => {
-    const input = h("input", { class: "input input-num", type: "number", value: box[key] });
-    input.addEventListener("input", () => {
-      const value = parseInt(input.value, 10);
-      if (!isNaN(value)) { box[key] = value; refresh(false); }
-    });
-    fields[key] = input;
-    return h("label", { class: "f-axis" }, label, input);
-  };
+  const controls = regionControls(box, () => refresh(false));
+  wireMarquee(stage, image, bounds, box, (live) => refresh(live));
 
-  // Screen position -> world coordinate. The map is a plan view, so this is a straight
-  // linear map from the image's pixel box onto the world box it covers.
-  const toWorld = (event) => {
-    const rect = image.getBoundingClientRect();
-    const fx = Math.min(Math.max((event.clientX - rect.left) / rect.width, 0), 0.9999);
-    const fz = Math.min(Math.max((event.clientY - rect.top) / rect.height, 0), 0.9999);
-    return {
-      x: bounds.min_x + Math.floor(fx * mapWidth),
-      z: bounds.min_z + Math.floor(fz * mapLength),
-    };
-  };
-
-  let dragStart = null;
-  stage.addEventListener("pointerdown", (e) => {
-    if (e.button !== 0) return;
-    dragStart = toWorld(e);
-    stage.setPointerCapture(e.pointerId);
-    e.preventDefault();
-  });
-  stage.addEventListener("pointermove", (e) => {
-    if (!dragStart) return;
-    const now = toWorld(e);
-    box.min_x = Math.min(dragStart.x, now.x); box.max_x = Math.max(dragStart.x, now.x);
-    box.min_z = Math.min(dragStart.z, now.z); box.max_z = Math.max(dragStart.z, now.z);
-    refresh(true);
-  });
-  const endDrag = (e) => {
-    if (!dragStart) return;
-    dragStart = null;
-    try { stage.releasePointerCapture(e.pointerId); } catch (_) { /* already gone */ }
-    refresh(false);
-  };
-  stage.addEventListener("pointerup", endDrag);
-  stage.addEventListener("pointercancel", endDrag);
-
-  function drawMarquee() {
-    const left = ((box.min_x - bounds.min_x) / mapWidth) * 100;
-    const top = ((box.min_z - bounds.min_z) / mapLength) * 100;
-    const w = ((box.max_x - box.min_x + 1) / mapWidth) * 100;
-    const l = ((box.max_z - box.min_z + 1) / mapLength) * 100;
-    marquee.style.left = left + "%";
-    marquee.style.top = top + "%";
-    marquee.style.width = w + "%";
-    marquee.style.height = l + "%";
-  }
-
-  // While dragging, size is computed locally so the readout tracks the pointer; on release
-  // the server confirms it. Same arithmetic either way — the round trip is what validates.
-  function showDims(dims) {
-    const over = dims.too_big;
-    readout.replaceChildren(
-      h("span", { class: "world-dims" + (over ? " over" : "") }, dims.dims),
-      h("span", { class: "muted" }, "  " + dims.volume.toLocaleString() + " blocks"),
-      over ? h("span", { class: "world-over" },
-        "  over the " + dims.max_volume.toLocaleString() + "-block limit — select a smaller area")
-        : null);
-    saveBtn.disabled = over;
-  }
-
-  function localDims() {
-    const w = Math.abs(box.max_x - box.min_x) + 1;
-    const hgt = Math.abs(box.max_y - box.min_y) + 1;
-    const l = Math.abs(box.max_z - box.min_z) + 1;
-    const volume = w * hgt * l;
-    return { dims: w + "x" + hgt + "x" + l, volume: volume,
-             max_volume: info.suggested.max_volume, too_big: volume > info.suggested.max_volume };
-  }
-
-  let pending = null;
   function refresh(localOnly) {
-    ["min_x", "max_x", "min_y", "max_y", "min_z", "max_z"].forEach((key) => {
-      if (fields[key] && document.activeElement !== fields[key]) fields[key].value = box[key];
-    });
-    drawMarquee();
-    showDims(localDims());
+    controls.sync(box);
+    drawMarquee(marquee, bounds, box);
+    showRegionSize(readout, saveBtn, localDims(box, info.suggested.max_volume));
     if (localOnly) return;
-    clearTimeout(pending);
-    pending = setTimeout(() => {
-      worldRegion(info.token, box).then(showDims).catch(() => { /* keep the local estimate */ });
-    }, 150);
+    controls.debounce(() => importRegion(info.token, box)
+      .then((dims) => showRegionSize(readout, saveBtn, dims))
+      .catch(() => { /* keep the local estimate */ }));
   }
 
   resetBtn.addEventListener("click", () => {
@@ -601,15 +589,19 @@ function renderWorldPicker(card, file, info) {
     delete box.blocks;
     refresh(false);
   });
+  wholeBtn.addEventListener("click", () => {
+    Object.assign(box, info.bounds);
+    refresh(false);
+  });
   cancelBtn.addEventListener("click", () => {
-    worldDiscard(info.token).catch(() => {});
+    importDiscard(info.token).catch(() => {});
     card.remove();
   });
 
   saveBtn.addEventListener("click", () => {
     saveBtn.disabled = cancelBtn.disabled = true;
     saveBtn.replaceChildren(h("span", { class: "spin" }), " Converting…");
-    worldSave(info.token, Object.assign({}, box, {
+    importSave(info.token, Object.assign({}, box, {
       name: nameInput.value, source_note: noteInput.value,
     }))
       .then((res) => {
@@ -632,21 +624,24 @@ function renderWorldPicker(card, file, info) {
       });
   });
 
+  const isWorld = info.kind !== "schematic";
   card.replaceChildren(
     h("div", { class: "chips" },
-      h("span", { class: "chip" }, h("span", { class: "k" }, "world"),
-        h("b", {}, (bounds.max_x - bounds.min_x + 1) + "x" + (bounds.max_z - bounds.min_z + 1))),
-      chip("Subchunks", info.subchunks.toLocaleString()),
-      chip("Built blocks", info.auto_bbox.blocks.toLocaleString())),
+      chip("Source", info.kind_label),
+      chip(isWorld ? "Chunks" : "Size",
+        isWorld ? info.chunks.toLocaleString()
+          : (info.bounds.max_x - info.bounds.min_x + 1) + "x"
+            + (info.bounds.max_y - info.bounds.min_y + 1) + "x"
+            + (info.bounds.max_z - info.bounds.min_z + 1)),
+      chip("Built blocks", (info.auto_bbox.blocks || 0).toLocaleString())),
     h("p", { class: "panel-sub" },
-      "Drag on the map to select one build. The blue box is what looked built when the "
-      + "world was read — a whole neighbourhood here, so narrow it to a single house."),
+      isWorld
+        ? "Drag on the map to select one build. The blue box is what looked built when the "
+          + "file was read — often a whole neighbourhood, so narrow it to a single house."
+        : "Drag on the map to trim this schematic. The blue box skips the ground and empty "
+          + "air around the build; “Use everything” keeps it exactly as dropped."),
     stage,
-    h("div", { class: "world-controls" },
-      number("min_x", "X"), number("max_x", "→"),
-      number("min_z", "Z"), number("max_z", "→"),
-      number("min_y", "Y"), number("max_y", "→"),
-      resetBtn),
+    h("div", { class: "world-controls" }, controls.fields, resetBtn, wholeBtn),
     readout,
     h("div", { class: "field" }, h("label", {}, "Name"), nameInput),
     h("div", { class: "field" }, h("label", {}, "Source / notes (optional)"), noteInput),
@@ -655,6 +650,105 @@ function renderWorldPicker(card, file, info) {
   refresh(false);
 }
 
+// ── Shared region-picking pieces ──────────────────────────────────────────────
+// Used by the importer and by re-cropping an existing build, so a box is drawn the same
+// way in both places.
+
+function regionControls(box, onChange) {
+  const fields = {};
+  const nodes = [];
+  const number = (key, label) => {
+    const input = h("input", { class: "input input-num", type: "number", value: box[key] });
+    input.addEventListener("input", () => {
+      const value = parseInt(input.value, 10);
+      if (!isNaN(value)) { box[key] = value; onChange(); }
+    });
+    fields[key] = input;
+    nodes.push(h("label", { class: "f-axis" }, label, input));
+  };
+  number("min_x", "X"); number("max_x", "→");
+  number("min_z", "Z"); number("max_z", "→");
+  number("min_y", "Y"); number("max_y", "→");
+
+  let pending = null;
+  return {
+    fields: nodes,
+    sync(current) {
+      Object.keys(fields).forEach((key) => {
+        if (document.activeElement !== fields[key]) fields[key].value = current[key];
+      });
+    },
+    debounce(fn) { clearTimeout(pending); pending = setTimeout(fn, 150); },
+  };
+}
+
+function wireMarquee(stage, image, bounds, box, onChange) {
+  const mapWidth = bounds.max_x - bounds.min_x + 1;
+  const mapLength = bounds.max_z - bounds.min_z + 1;
+  // Screen position -> world coordinate. The map is a plan view, so this is a straight
+  // linear map from the image's pixel box onto the area it covers.
+  const toWorld = (event) => {
+    const rect = image.getBoundingClientRect();
+    const fx = Math.min(Math.max((event.clientX - rect.left) / rect.width, 0), 0.9999);
+    const fz = Math.min(Math.max((event.clientY - rect.top) / rect.height, 0), 0.9999);
+    return { x: bounds.min_x + Math.floor(fx * mapWidth),
+             z: bounds.min_z + Math.floor(fz * mapLength) };
+  };
+
+  let dragStart = null;
+  stage.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    dragStart = toWorld(e);
+    stage.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+  stage.addEventListener("pointermove", (e) => {
+    if (!dragStart) return;
+    const now = toWorld(e);
+    box.min_x = Math.min(dragStart.x, now.x); box.max_x = Math.max(dragStart.x, now.x);
+    box.min_z = Math.min(dragStart.z, now.z); box.max_z = Math.max(dragStart.z, now.z);
+    onChange(true);
+  });
+  const endDrag = (e) => {
+    if (!dragStart) return;
+    dragStart = null;
+    try { stage.releasePointerCapture(e.pointerId); } catch (_) { /* already gone */ }
+    onChange(false);
+  };
+  stage.addEventListener("pointerup", endDrag);
+  stage.addEventListener("pointercancel", endDrag);
+}
+
+function drawMarquee(marquee, bounds, box) {
+  const mapWidth = bounds.max_x - bounds.min_x + 1;
+  const mapLength = bounds.max_z - bounds.min_z + 1;
+  marquee.style.left = (((box.min_x - bounds.min_x) / mapWidth) * 100) + "%";
+  marquee.style.top = (((box.min_z - bounds.min_z) / mapLength) * 100) + "%";
+  marquee.style.width = (((box.max_x - box.min_x + 1) / mapWidth) * 100) + "%";
+  marquee.style.height = (((box.max_z - box.min_z + 1) / mapLength) * 100) + "%";
+}
+
+// While dragging, the size is computed locally so the readout tracks the pointer; on
+// release the server confirms it. Same arithmetic either way — the round trip validates.
+function localDims(box, maxVolume) {
+  const w = Math.abs(box.max_x - box.min_x) + 1;
+  const hgt = Math.abs(box.max_y - box.min_y) + 1;
+  const l = Math.abs(box.max_z - box.min_z) + 1;
+  const volume = w * hgt * l;
+  return { dims: w + "x" + hgt + "x" + l, volume: volume,
+           max_volume: maxVolume, too_big: volume > maxVolume };
+}
+
+function showRegionSize(readout, saveBtn, dims) {
+  const over = dims.too_big;
+  readout.replaceChildren(
+    h("span", { class: "world-dims" + (over ? " over" : "") }, dims.dims),
+    h("span", { class: "muted" }, "  " + dims.volume.toLocaleString() + " blocks"),
+    over ? h("span", { class: "world-over" },
+      "  over the " + dims.max_volume.toLocaleString() + "-block limit — select a smaller area")
+      : null);
+  if (saveBtn) saveBtn.disabled = over;
+}
 function renderBatchAdd(files, work) {
   const entries = files.map((file) => ({
     file, name: schematicBaseName(file.name), note: "",
@@ -1049,7 +1143,7 @@ function renderDetail(body, b) {
     grid,
     h("div", { class: "divider" }));
 
-  body.append(shotsSection(b), h("div", { class: "divider" }),
+  body.append(recropSection(b), shotsSection(b), h("div", { class: "divider" }),
     imageSection(b), h("div", { class: "divider" }),
     meshSection(b), dangerZone(b));
 }
@@ -1145,6 +1239,86 @@ function editDetails(b) {
 
   return h("details", { class: "edit-details" },
     h("summary", { class: "muted" }, "Edit name, source URL and notes"), form);
+}
+
+// ── Detail: re-cropping ───────────────────────────────────────────────────────
+// The uncropped input is kept beside every imported build, so a box drawn too tight can be
+// redrawn — widened, not only narrowed. Builds added before that was kept have no source,
+// and say so rather than offering a control that can't work.
+function recropSection(b) {
+  const wrap = h("div", {});
+  wrap.append(h("div", { class: "section-title" }, "Crop"));
+
+  if (!b.can_recrop) {
+    wrap.append(h("p", { class: "panel-sub muted" },
+      "This build was added before the uncropped original was kept, so there is nothing "
+      + "to re-cut from. Re-import the file to be able to crop it."));
+    return wrap;
+  }
+
+  const details = h("details", { class: "recrop" },
+    h("summary", { class: "muted" }, "Re-crop this build"));
+  const body = h("div", { class: "recrop-body" },
+    h("div", {}, h("span", { class: "spin" }), " Loading the original…"));
+  details.append(body);
+  wrap.append(details);
+
+  let loaded = false;
+  details.addEventListener("toggle", () => {
+    if (loaded || !details.hasAttribute("open")) return;
+    loaded = true;
+    sourceBounds(b.id)
+      .then((info) => buildRecropUI(body, b, info))
+      .catch((err) => body.replaceChildren(errorNotice(err, "Could not load the original.")));
+  });
+  return wrap;
+}
+
+function buildRecropUI(body, b, info) {
+  const bounds = info.map_bounds;
+  const box = Object.assign({}, info.crop);
+  const image = h("img", { class: "world-map", src: "/api/builds/" + b.id + "/source-preview.png",
+    alt: "The uncropped build" });
+  const marquee = h("div", { class: "world-marquee" });
+  const stage = h("div", { class: "world-stage" }, image, marquee);
+  const readout = h("div", { class: "world-readout" });
+  const applyBtn = h("button", { class: "btn" }, "Apply new crop");
+  const wholeBtn = h("button", { class: "btn btn-ghost btn-sm" }, "Use everything");
+
+  const controls = regionControls(box, () => refresh());
+  wireMarquee(stage, image, bounds, box, () => refresh());
+
+  function refresh() {
+    controls.sync(box);
+    drawMarquee(marquee, bounds, box);
+    showRegionSize(readout, applyBtn, localDims(box, info.current.max_volume));
+  }
+
+  wholeBtn.addEventListener("click", () => { Object.assign(box, bounds); refresh(); });
+  applyBtn.addEventListener("click", () => {
+    applyBtn.disabled = true;
+    applyBtn.replaceChildren(h("span", { class: "spin" }), " Re-cutting…");
+    recropBuild(b.id, box)
+      .then((res) => {
+        toast("Re-cropped to " + res.build.dims + ".", "ok");
+        viewDetail(b.id);
+      })
+      .catch((err) => {
+        applyBtn.disabled = false;
+        applyBtn.replaceChildren(document.createTextNode("Apply new crop"));
+        body.append(errorNotice(err, "Could not re-crop."));
+      });
+  });
+
+  body.replaceChildren(
+    h("p", { class: "panel-sub" },
+      "This is the whole of what was imported. Drag a new box — you can widen it as well "
+      + "as narrow it. Screenshots, the AI image and the mesh all stay attached."),
+    stage,
+    h("div", { class: "world-controls" }, controls.fields, wholeBtn),
+    readout,
+    h("div", { class: "row-actions" }, applyBtn));
+  refresh();
 }
 
 // ── Detail: step 2 (optional), reference screenshots ──────────────────────────

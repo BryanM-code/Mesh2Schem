@@ -26,14 +26,14 @@
   <template id="tpl-add">
     <section class="panel">
       <h1 class="panel-title">Add New Build</h1>
-      <p class="panel-sub">Drop one schematic to review it, or several to add a batch. Older <code>.schematic</code> files are converted to <code>.schem</code> automatically, and a Bedrock <code>.mcworld</code> export opens a map you can cut a build out of. Every file is checked before it&rsquo;s read, and your originals are only ever copied &mdash; never moved or deleted.</p>
+      <p class="panel-sub">Drop one schematic to review it, or several to add a batch. Older <code>.schematic</code> files are converted to <code>.schem</code> automatically, and a Bedrock <code>.mcworld</code> or a zipped Java world opens a map you can cut a build out of. Dropping one file lets you crop it; dropping several adds them as a batch. Every file is checked before it&rsquo;s read, and your originals are only ever copied &mdash; never moved or deleted.</p>
       <div class="dropzone" data-drop="schem">
         <div class="dropzone-inner">
           <div class="dropzone-icon">&#8681;</div>
-          <div class="dropzone-text"><strong>Drop .schem, .schematic or .mcworld files here</strong></div>
+          <div class="dropzone-text"><strong>Drop a .schem, .mcworld or a zipped world here</strong></div>
           <div class="dropzone-hint">or click to browse</div>
         </div>
-        <input type="file" accept=".schem,.schematic,.mcworld" multiple hidden>
+        <input type="file" accept=".schem,.schematic,.mcworld,.zip" multiple hidden>
       </div>
       <div id="add-work"></div>
     </section>

@@ -45,6 +45,8 @@ from flask import Flask, jsonify, render_template, request, Response, send_file
 
 import bedrock_world
 import db
+import import_source
+import schem_source
 import image_validate
 import mcworld_convert
 import mcworld_preview
@@ -64,7 +66,7 @@ MCWORLD_EXTENSIONS = (".mcworld",)
 # server left running while the code changes serves a NEW frontend against an OLD API. The
 # frontend checks this number and says so, instead of silently missing controls whose data
 # never arrived.
-API_VERSION = 4
+API_VERSION = 5
 
 # Everything a build can have a picture of. Whitelisted rather than interpolated: the
 # thumbnail route is the only one that reaches into data/builds/, and the path it builds
@@ -92,8 +94,8 @@ TMP_DIR.mkdir(parents=True, exist_ok=True)
 # the folders that arrived -- so reconcile it with the disk before serving anything.
 STARTUP_SYNC = db.sync_from_disk_if_needed()
 
-# World imports stash their upload until a region is chosen; sweep any that were abandoned.
-(TMP_DIR / "mcworld").mkdir(parents=True, exist_ok=True)
+# Imports stash their upload until a region is chosen; sweep any that were abandoned.
+(TMP_DIR / "import").mkdir(parents=True, exist_ok=True)
 
 
 # ── Upload helpers ────────────────────────────────────────────────────────────
@@ -105,6 +107,18 @@ def _save_upload(file_storage, suffix: str) -> Path:
     tmp_path = Path(tmp)
     file_storage.save(str(tmp_path))
     return tmp_path
+
+
+def _blank_temp(suffix: str) -> Path:
+    """A fresh temp path with no file handle left open on it.
+
+    mkstemp hands back an open descriptor as well as a name; dropping it on the floor
+    leaks the handle, and on Windows that also locks the file so nothing can delete it
+    afterwards.
+    """
+    fd, name = tempfile.mkstemp(dir=str(TMP_DIR), suffix=suffix)
+    os.close(fd)
+    return Path(name)
 
 
 def _cleanup(path) -> None:
@@ -278,36 +292,46 @@ def api_get_build(build_id: int):
     return jsonify(build=build)
 
 
-# ── API: Bedrock world import ─────────────────────────────────────────────────
-# A .mcworld holds a whole world, not a build, so importing takes two steps rather than
-# one: upload and look at it, then pick the region that is actually the build. The upload
-# is stashed under a token between the two so a large world isn't sent twice, and the
-# parsed world is cached in memory so choosing a region stays instant.
+# ── API: importing anything droppable ─────────────────────────────────────────
+# Four things arrive here and only one of them is a schematic: a `.schem`, a Bedrock
+# `.mcworld`, a zipped Java world, or a zip of something else entirely. The first three all
+# open as a VoxelWorld, so they share one flow: stash the upload, show a map of it, let a
+# region be chosen, convert that region to a `.schem`.
+#
+# The upload is stashed under a token between the two steps so a large world isn't sent
+# twice, and the parsed source is cached in memory so dragging a box stays instant.
 
-WORLD_DIR = TMP_DIR / "mcworld"
+IMPORT_DIR = TMP_DIR / "import"
 _TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
-# Parsed worlds, keyed by token. A world is tens of MB parsed, and the whole point of the
-# token is that you are mid-import on exactly one of them.
-_world_cache: "OrderedDict[str, object]" = OrderedDict()
-_WORLD_CACHE_MAX = 3
-_world_lock = threading.Lock()
+# Parsed sources, keyed by token. One is tens of MB, and the point of a token is that you
+# are mid-import on exactly one of them.
+_source_cache: "OrderedDict[str, object]" = OrderedDict()
+_SOURCE_CACHE_MAX = 3
+_source_lock = threading.Lock()
 # How long an abandoned upload lingers before the next startup sweeps it.
-WORLD_TTL_SECONDS = 24 * 3600
+IMPORT_TTL_SECONDS = 24 * 3600
+
+# What a source is called in the UI, and whether its coordinates are world coordinates.
+KIND_LABELS = {
+    "schematic": "schematic",
+    "bedrock_world": "Bedrock world",
+    "java_world": "Java world",
+}
 
 
-def _world_path(token: str) -> Path:
-    """Path for a token's stashed upload. The token is validated, never joined blindly."""
+def _import_dir(token: str) -> Path:
+    """Folder for a token's stashed upload. The token is validated, never joined blindly."""
     if not _TOKEN_RE.match(token or ""):
         raise ValueError("bad token")
-    return WORLD_DIR / token / "world.mcworld"
+    return IMPORT_DIR / token
 
 
-def _sweep_world_uploads() -> int:
+def _sweep_imports() -> int:
     """Delete stashed uploads left behind by imports that were never finished."""
     removed = 0
     try:
-        cutoff = time.time() - WORLD_TTL_SECONDS
-        for folder in WORLD_DIR.iterdir():
+        cutoff = time.time() - IMPORT_TTL_SECONDS
+        for folder in IMPORT_DIR.iterdir():
             if folder.is_dir() and folder.stat().st_mtime < cutoff:
                 shutil.rmtree(folder, ignore_errors=True)
                 removed += 1
@@ -316,35 +340,39 @@ def _sweep_world_uploads() -> int:
     return removed
 
 
-def _load_world(token: str):
-    """The parsed world for a token, from cache or by reading the stashed upload."""
-    with _world_lock:
-        cached = _world_cache.get(token)
+def _stashed_upload(token: str) -> Optional[Path]:
+    folder = _import_dir(token)
+    for candidate in folder.glob("upload.*"):
+        return candidate
+    return None
+
+
+def _load_source(token: str):
+    """The parsed source for a token, from cache or by re-reading the stashed upload."""
+    with _source_lock:
+        cached = _source_cache.get(token)
         if cached is not None:
-            _world_cache.move_to_end(token)
+            _source_cache.move_to_end(token)
             return cached
-    path = _world_path(token)
-    if not path.exists():
+    upload = _stashed_upload(token)
+    if upload is None:
         return None
-    world = bedrock_world.open_world(path)
-    with _world_lock:
-        _world_cache[token] = world
-        while len(_world_cache) > _WORLD_CACHE_MAX:
-            _world_cache.popitem(last=False)
-    return world
+    kind = (_import_dir(token) / "kind.txt").read_text(encoding="utf-8").strip()
+    source = import_source.open_source(upload, kind)
+    with _source_lock:
+        _source_cache[token] = source
+        while len(_source_cache) > _SOURCE_CACHE_MAX:
+            _source_cache.popitem(last=False)
+    return source
 
 
-def _forget_world(token: str) -> None:
-    with _world_lock:
-        _world_cache.pop(token, None)
+def _forget_import(token: str) -> None:
+    with _source_lock:
+        _source_cache.pop(token, None)
     try:
-        shutil.rmtree(_world_path(token).parent, ignore_errors=True)
+        shutil.rmtree(_import_dir(token), ignore_errors=True)
     except ValueError:
         pass
-
-
-def _is_mcworld_filename(name) -> bool:
-    return str(name or "").lower().endswith(MCWORLD_EXTENSIONS)
 
 
 def _bbox_from(payload: dict) -> dict:
@@ -356,22 +384,6 @@ def _bbox_from(payload: dict) -> dict:
         raise _ImageRejected("A region needs min_x/max_x, min_y/max_y and min_z/max_z.")
 
 
-def _preview_bounds(world) -> dict:
-    """The X/Z frame the preview map covers.
-
-    Framed on what was built, not the world's full extent: a world is mostly empty terrain,
-    and framing on all of it would shrink the part you actually need to click on. Returned
-    with the inspect response so the client can turn a click into world coordinates.
-    """
-    padding = 12
-    bounds = dict(world.world_bounds())
-    auto = world.auto_bbox()
-    if auto:
-        bounds.update(min_x=auto["min_x"] - padding, max_x=auto["max_x"] + padding,
-                      min_z=auto["min_z"] - padding, max_z=auto["max_z"] + padding)
-    return bounds
-
-
 def _region_dims(bbox: dict) -> dict:
     width = abs(bbox["max_x"] - bbox["min_x"]) + 1
     height = abs(bbox["max_y"] - bbox["min_y"]) + 1
@@ -379,92 +391,121 @@ def _region_dims(bbox: dict) -> dict:
     volume = width * height * length
     return {"w": width, "h": height, "l": length, "longest": max(width, height, length),
             "dims": "{}x{}x{}".format(width, height, length), "volume": volume,
-            "max_volume": schem_convert.MAX_VOLUME, "too_big": volume > schem_convert.MAX_VOLUME}
+            "max_volume": schem_convert.MAX_VOLUME,
+            "too_big": volume > schem_convert.MAX_VOLUME}
 
 
-@app.post("/api/mcworld/inspect")
-def api_mcworld_inspect():
-    """Take a .mcworld, parse it, and report what's in it plus where the build looks to be.
+def _preview_bounds(source) -> dict:
+    """The X/Z frame the preview map covers.
 
-    Saves nothing to the library -- this is the world equivalent of /api/inspect.
+    Framed on what was built, not the full extent: a world is mostly empty terrain, and
+    framing on all of it would shrink the part you actually need to click on. A schematic
+    is already tight, so it gets no padding.
     """
-    f = request.files.get("world")
+    bounds = dict(source.world_bounds())
+    auto = source.auto_bbox()
+    if auto and getattr(source, "source_label", "") != "schematic":
+        padding = 12
+        bounds.update(min_x=auto["min_x"] - padding, max_x=auto["max_x"] + padding,
+                      min_z=auto["min_z"] - padding, max_z=auto["max_z"] + padding)
+    return bounds
+
+
+def _source_payload(token: str, source, kind: str, filename: str) -> dict:
+    bounds = source.world_bounds()
+    auto = source.auto_bbox() or dict(bounds, blocks=0)
+    return {
+        "token": token, "kind": kind, "kind_label": KIND_LABELS.get(kind, kind),
+        "filename": filename, "level_name": getattr(source, "level_name", "") or "",
+        "chunks": len(source.subchunks), "bounds": bounds, "auto_bbox": auto,
+        "map_bounds": _preview_bounds(source), "suggested": _region_dims(auto),
+        "preview": "/api/import/{}/preview.png".format(token),
+    }
+
+
+@app.post("/api/import/inspect")
+def api_import_inspect():
+    """Identify a dropped file and, when it holds blocks, open it for cropping.
+
+    Saves nothing to the library. A zip that turns out to hold neither a world nor a
+    schematic comes back described rather than merely refused -- "which part of this is
+    the build" is otherwise impossible to answer by looking at it.
+    """
+    f = request.files.get("file")
     if f is None or not f.filename:
         return jsonify(error="No file provided."), 400
-    if not _is_mcworld_filename(f.filename):
-        return jsonify(error="Expected a .mcworld file."), 400
 
     token = secrets.token_hex(16)
-    folder = WORLD_DIR / token
+    folder = _import_dir(token)
     folder.mkdir(parents=True, exist_ok=True)
-    target = folder / "world.mcworld"
+    suffix = Path(str(f.filename)).suffix.lower() or ".bin"
+    upload = folder / ("upload" + suffix)
     try:
-        f.save(str(target))
-        world = bedrock_world.open_world(target)
-    except bedrock_world.WorldError as exc:
-        shutil.rmtree(folder, ignore_errors=True)
+        f.save(str(upload))
+        described = import_source.describe_upload(upload, f.filename)
+        kind = described["kind"]
+
+        if kind == "zip_schematics":
+            extracted = import_source.extract_zip_schematics(
+                upload, described["schematics"], folder / "schematics")
+            (folder / "kind.txt").write_text(kind, encoding="utf-8")
+            return jsonify(token=token, kind=kind, filename=f.filename,
+                           schematics=[{"name": e["name"], "size": e["size"]}
+                                       for e in extracted])
+
+        if kind not in KIND_LABELS:
+            _forget_import(token)
+            return jsonify(kind=kind, filename=f.filename,
+                           error=described.get("reason", "Nothing importable in that file."),
+                           contents=described.get("contents", []),
+                           worlds=described.get("worlds", [])), 400
+
+        (folder / "kind.txt").write_text(kind, encoding="utf-8")
+        source = import_source.open_source(upload, kind)
+    except import_source.WorldError as exc:
+        _forget_import(token)
         return jsonify(filename=f.filename, **exc.details()), 400
     except Exception:
-        shutil.rmtree(folder, ignore_errors=True)
+        _forget_import(token)
         raise
 
-    with _world_lock:
-        _world_cache[token] = world
-        while len(_world_cache) > _WORLD_CACHE_MAX:
-            _world_cache.popitem(last=False)
-
-    bounds = world.world_bounds()
-    auto = world.auto_bbox()
-    if auto is None:
-        _forget_world(token)
-        return jsonify(error="This world has no buildings in it -- only terrain.",
-                       code="nothing_built", stage="mcworld"), 400
-
-    return jsonify(
-        token=token, filename=f.filename, level_name=world.level_name,
-        subchunks=len(world.subchunks), bounds=bounds, auto_bbox=auto,
-        map_bounds=_preview_bounds(world), suggested=_region_dims(auto),
-        preview="/api/mcworld/{}/preview.png".format(token))
+    with _source_lock:
+        _source_cache[token] = source
+        while len(_source_cache) > _SOURCE_CACHE_MAX:
+            _source_cache.popitem(last=False)
+    return jsonify(**_source_payload(token, source, kind, f.filename))
 
 
-@app.get("/api/mcworld/<token>/preview.png")
-def api_mcworld_preview(token: str):
-    """Top-down map of the world, with the auto-detected build area outlined."""
+@app.get("/api/import/<token>/preview.png")
+def api_import_preview(token: str):
+    """Top-down map of the source, with the auto-detected build area outlined."""
     try:
-        world = _load_world(token)
+        source = _load_source(token)
     except ValueError:
         return jsonify(error="Unknown import."), 404
-    except bedrock_world.WorldError as exc:
+    except import_source.WorldError as exc:
         return jsonify(**exc.details()), 400
-    if world is None:
-        return jsonify(error="That import has expired. Drop the world again."), 404
+    if source is None:
+        return jsonify(error="That import has expired. Drop the file again."), 404
 
-    auto = world.auto_bbox()
-    bounds = _preview_bounds(world)
-
-    image = mcworld_preview.render_world_map(world, bounds, highlight=auto)
+    image = mcworld_preview.render_world_map(
+        source, _preview_bounds(source), highlight=source.auto_bbox())
     if image is None:
         return jsonify(error="Nothing to preview."), 404
-
     buffer = io.BytesIO()
     image.save(buffer, "PNG", optimize=True)
-    buffer.seek(0)
-    response = Response(buffer.getvalue(), mimetype="image/png")
-    # The map covers a fixed area of a stashed upload, so it can't change under the token.
-    response.headers["X-Map-Bounds"] = "{},{},{},{}".format(
-        bounds["min_x"], bounds["min_z"], bounds["max_x"], bounds["max_z"])
-    return response
+    return Response(buffer.getvalue(), mimetype="image/png")
 
 
-@app.post("/api/mcworld/<token>/region")
-def api_mcworld_region(token: str):
-    """Dimensions and block count for a candidate region, without converting anything."""
+@app.post("/api/import/<token>/region")
+def api_import_region(token: str):
+    """Dimensions for a candidate region, without converting anything."""
     try:
-        world = _load_world(token)
+        source = _load_source(token)
     except ValueError:
         return jsonify(error="Unknown import."), 404
-    if world is None:
-        return jsonify(error="That import has expired. Drop the world again."), 404
+    if source is None:
+        return jsonify(error="That import has expired. Drop the file again."), 404
     try:
         bbox = _bbox_from(request.get_json(silent=True) or {})
     except _ImageRejected as exc:
@@ -472,15 +513,20 @@ def api_mcworld_region(token: str):
     return jsonify(bbox=bbox, **_region_dims(bbox))
 
 
-@app.post("/api/mcworld/<token>/save")
-def api_mcworld_save(token: str):
-    """Convert the chosen region to a .schem and add it to the library."""
+@app.post("/api/import/<token>/save")
+def api_import_save(token: str):
+    """Convert the chosen region to a .schem and add it to the library.
+
+    The *whole* source is stored alongside the crop, so the region can be redrawn later --
+    widened, not only narrowed. For a world that means its built area rather than every
+    chunk of empty terrain.
+    """
     try:
-        world = _load_world(token)
+        source = _load_source(token)
     except ValueError:
         return jsonify(error="Unknown import."), 404
-    if world is None:
-        return jsonify(error="That import has expired. Drop the world again."), 404
+    if source is None:
+        return jsonify(error="That import has expired. Drop the file again."), 404
 
     payload = request.get_json(silent=True) or {}
     try:
@@ -492,50 +538,164 @@ def api_mcworld_save(token: str):
     source_note = (payload.get("source_note") or "").strip()
     allow_duplicate = _truthy(payload.get("allow_duplicate", False))
 
-    tmp = None
+    crop_tmp = source_tmp = None
     try:
-        grid, names = world.extract_region(bbox)
-        fd, tmp_name = tempfile.mkstemp(dir=str(TMP_DIR), suffix=".schem")
-        os.close(fd)
-        tmp = Path(tmp_name)
-        info = mcworld_convert.region_to_schem(grid, names, tmp)
+        grid, names = source.extract_region(bbox)
+        crop_tmp = _blank_temp(".schem")
+        info = mcworld_convert.region_to_schem(grid, names, crop_tmp)
 
-        # Conversion warnings belong with the build, the way the legacy .schematic path
-        # records what it could not carry across.
+        # The re-croppable source: the whole schematic, or a world's built area.
+        keep = source.croppable_extent()
+        source_grid, source_names = source.extract_region(keep)
+        source_tmp = _blank_temp(".schem")
+        mcworld_convert.region_to_schem(source_grid, source_names, source_tmp)
+
+        # The crop is recorded in the *source's* own coordinates, so re-cropping later has
+        # a frame that still means something once the world is gone.
+        crop = {"min_x": bbox["min_x"] - keep["min_x"], "max_x": bbox["max_x"] - keep["min_x"],
+                "min_y": bbox["min_y"] - keep["min_y"], "max_y": bbox["max_y"] - keep["min_y"],
+                "min_z": bbox["min_z"] - keep["min_z"], "max_z": bbox["max_z"] - keep["min_z"]}
+
         note = source_note
         if info["warnings"]:
             joined = " ".join(info["warnings"])
             note = (note + "  " + joined).strip() if note else joined
 
-        schem_hash = sha256_file(tmp)
         try:
-            row = db.create_build(name, note, tmp, schem_hash,
+            row = db.create_build(name, note, crop_tmp, sha256_file(crop_tmp),
                                   (info["width"], info["height"], info["length"]),
-                                  allow_duplicate)
+                                  allow_duplicate, temp_source_path=source_tmp,
+                                  crop=db._normalised_crop(crop))
         except db.DuplicateBuildError as exc:
             return jsonify(error="duplicate", existing=exc.existing), 409
         _warm_thumb(row, "schem")
         return jsonify(build=row, warnings=info["warnings"],
                        palette_size=info["palette_size"]), 201
-    except bedrock_world.WorldError as exc:
+    except import_source.WorldError as exc:
         return jsonify(**exc.details()), 400
     finally:
-        _cleanup(tmp)
+        _cleanup(crop_tmp)
+        _cleanup(source_tmp)
 
 
-@app.delete("/api/mcworld/<token>")
-def api_mcworld_discard(token: str):
+@app.post("/api/import/<token>/save-schematics")
+def api_import_save_schematics(token: str):
+    """Add every schematic found inside a zip, as a batch.
+
+    A zip of schematics is several builds, not one region, so it takes the batch path
+    rather than the picker -- each can be cropped afterwards from its own build page.
+    """
+    try:
+        folder = _import_dir(token) / "schematics"
+    except ValueError:
+        return jsonify(error="Unknown import."), 404
+    if not folder.is_dir():
+        return jsonify(error="That import has expired. Drop the file again."), 404
+
+    added, failed = [], []
+    for path in sorted(folder.iterdir()):
+        try:
+            with open(path, "rb") as handle:
+                prepared_name = path.name.split("__", 1)[-1]
+                converted = path.with_suffix(".converted.schem")
+                result = schem_convert.ensure_sponge(path, converted)
+                digest = sha256_file(result.path)
+                row = db.create_build(Path(prepared_name).stem, "", result.path, digest,
+                                      result.info.dims, allow_duplicate=False)
+                added.append({"name": row["name"], "id": row["id"], "dims": row["dims"]})
+                _warm_thumb(row, "schem")
+                del handle
+        except db.DuplicateBuildError:
+            failed.append({"name": path.name, "reason": "already in the library"})
+        except SchematicError as exc:
+            failed.append({"name": path.name, "reason": exc.message})
+        except Exception as exc:                       # pragma: no cover - defensive
+            failed.append({"name": path.name, "reason": str(exc)})
+        finally:
+            _cleanup(path.with_suffix(".converted.schem"))
+    _forget_import(token)
+    return jsonify(added=added, failed=failed), (201 if added else 400)
+
+
+@app.delete("/api/import/<token>")
+def api_import_discard(token: str):
     """Drop a stashed upload without importing anything from it."""
     try:
-        _forget_world(token)
+        _forget_import(token)
     except ValueError:
         return jsonify(error="Unknown import."), 404
     return jsonify(discarded=True)
 
 
+# ── API: re-cropping an existing build ────────────────────────────────────────
+
+@app.get("/api/builds/<int:build_id>/source-preview.png")
+def api_build_source_preview(build_id: int):
+    """Map of a build's uncropped source, with its current crop outlined."""
+    build = db.get_build(build_id)
+    if build is None:
+        return jsonify(error="Build not found."), 404
+    source_file = db.build_dir(build_id, build["slug"]) / "schem" / "source.schem"
+    if not source_file.exists():
+        return jsonify(error="This build has no re-croppable source."), 404
+    try:
+        source = schem_source.load_schem_source(source_file)
+    except import_source.WorldError as exc:
+        return jsonify(**exc.details()), 400
+
+    image = mcworld_preview.render_world_map(
+        source, source.world_bounds(), highlight=build.get("crop"))
+    if image is None:
+        return jsonify(error="Nothing to preview."), 404
+    buffer = io.BytesIO()
+    image.save(buffer, "PNG", optimize=True)
+    return Response(buffer.getvalue(), mimetype="image/png")
+
+
+@app.get("/api/builds/<int:build_id>/source-bounds")
+def api_build_source_bounds(build_id: int):
+    """The frame a re-crop is drawn in: the source's extent and the current crop."""
+    build = db.get_build(build_id)
+    if build is None:
+        return jsonify(error="Build not found."), 404
+    source_file = db.build_dir(build_id, build["slug"]) / "schem" / "source.schem"
+    if not source_file.exists():
+        return jsonify(error="This build has no re-croppable source."), 404
+    source = schem_source.load_schem_source(source_file)
+    bounds = source.world_bounds()
+    return jsonify(bounds=bounds, map_bounds=bounds,
+                   crop=build.get("crop") or bounds,
+                   current=_region_dims(build.get("crop") or bounds))
+
+
+@app.post("/api/builds/<int:build_id>/recrop")
+def api_build_recrop(build_id: int):
+    """Re-cut a build's schematic from its stored source."""
+    try:
+        bbox = _bbox_from(request.get_json(silent=True) or {})
+    except _ImageRejected as exc:
+        return jsonify(error=exc.reason), 400
+    dims = _region_dims(bbox)
+    if dims["too_big"]:
+        return jsonify(error="That region is {} = {:,} blocks; the limit is {:,}.".format(
+            dims["dims"], dims["volume"], dims["max_volume"])), 400
+    try:
+        build = db.recrop_build(build_id, bbox)
+    except db.BuildNotFoundError:
+        return jsonify(error="Build not found."), 404
+    except db.NoSourceError:
+        return jsonify(error="no_source",
+                       message="This build was added before crops were kept, so there is "
+                               "no uncropped source to re-cut from."), 409
+    except import_source.WorldError as exc:
+        return jsonify(**exc.details()), 400
+    _warm_thumb(build, "schem")
+    return jsonify(build=build)
+
+
 # An import that was started and never finished leaves its upload behind; clear out any
 # that are older than the TTL. Done at import so it covers `flask run` as well.
-SWEPT_WORLDS = _sweep_world_uploads()
+SWEPT_IMPORTS = _sweep_imports()
 
 
 # ── API: edit metadata ────────────────────────────────────────────────────────

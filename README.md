@@ -26,11 +26,13 @@ The parts are collected at different times, so progress is tracked **on disk** (
 named folders) and survives across sessions. Status is always *derived* from which files
 exist, and names the first one still missing.
 
-- **Add New Build** — drop one schematic (detailed review) or many at once (batch list).
-  `.schem`, the older `.schematic`, and Bedrock `.mcworld` world exports are all accepted;
-  legacy files are **converted to `.schem`** on the way in and a world opens a map you cut
-  a build out of. Dimensions are read instantly; content is sha256-hashed and
-  dedup-checked. Your original files are **copied in, never moved or deleted**.
+- **Add New Build** — drop a schematic, a Bedrock `.mcworld`, or a zipped Java world, and
+  a map opens so you can **drag out the part you want**. Legacy `.schematic` files are
+  converted on the way in; a zip with nothing usable in it tells you what it does hold.
+  Several files at once skip the picker and add as a batch. Content is sha256-hashed and
+  dedup-checked, and your originals are **copied in, never moved or deleted**.
+- **Re-crop** — drew the box wrong? The uncropped input is kept, so a crop can be redrawn
+  later and **widened**, not just narrowed.
 - **Library** — every build as a **thumbnail grid** or a searchable / filterable / sortable
   table (your choice is remembered), with stage badges, progress pips and a CSV export.
 - **Reference screenshots** — up to 3 quick captures per build. **Paste straight from the
@@ -101,9 +103,13 @@ BuildDataCollector/
   schem_convert.py         # format detection + legacy .schematic -> .schem conversion
   legacy_blocks.py         # pre-1.13 block id:data -> modern blockstate table
   schem_meta.py            # reads schematic Width/Height/Length + sha256
+  voxel_world.py           # chunks + geometry shared by every source
   bedrock_world.py         # reads a Bedrock .mcworld (zip + LevelDB + subchunks)
-  mcworld_convert.py       # a region of a world -> Sponge .schem
-  mcworld_preview.py       # top-down map of a world, for picking that region
+  java_world.py            # reads a zipped Java world (Anvil region files)
+  schem_source.py          # presents a .schem as a croppable source
+  import_source.py         # works out what a dropped file actually is
+  mcworld_convert.py       # a chosen region -> Sponge .schem
+  mcworld_preview.py       # top-down map, for picking that region
   schem_voxels.py          # decodes a .schem into a voxel grid (for thumbnails)
   block_colors.py          # blockstate -> approximate RGB (for thumbnails)
   thumbs.py                # isometric renders of a schem and a glb, cached on disk
@@ -118,6 +124,7 @@ BuildDataCollector/
     builds/
       <build_id>__<slug>/
         schem/original.schem      # always Sponge .schem, whatever was dropped in
+        schem/source.schem        # the uncropped input, so the crop can be redrawn
         shots/shot-1.png          # reference screenshots, up to 3, always PNG
         shots/shot-2.png
         image/generated.png       # the AI-generated image TRELLIS consumes
@@ -145,7 +152,8 @@ Builds downloaded from the internet come in two formats, and both are accepted:
 | --- | --- |
 | **Sponge `.schem`** (v1 / v2 / v3) | Stored byte-for-byte as-is. |
 | **MCEdit `.schematic`** (pre-1.13) | Converted to Sponge **v2** and stored as `.schem`. |
-| **Bedrock `.mcworld`** | A whole world — you pick a region on a map, which is converted to Sponge **v2**. See [Bedrock world exports](#bedrock-world-exports-mcworld). |
+| **Bedrock `.mcworld`** | A whole world — pick a region on a map, converted to Sponge **v2**. |
+| **Zipped Java world** | `level.dat` + `region/*.mca`. Same picker. See [Worlds, zips, and cropping](#worlds-zips-and-cropping). |
 
 The format is decided by reading the file, never by its extension — a `.schem` that is
 really an old MCEdit file still gets converted, and a `.schematic` that is really Sponge
@@ -178,72 +186,97 @@ build's shape survives) and **entities** (mobs, item frames, armour stands), whi
 part of a build's geometry. Item contents inside chests are copied across untouched but
 are not themselves flattened.
 
-## Bedrock world exports (`.mcworld`)
+## Worlds, zips, and cropping
 
-A `.mcworld` is a **Bedrock Edition world export** — a ZIP holding `level.dat` and a LevelDB
-database of chunks. It is not a schematic, so it can't just be stored: a world holds a whole
-area, often several separate builds, and the library's unit is one build.
+Builds arrive in more shapes than schematics, and only one of them is a `.schem`:
 
-Drop one on the Add page and you get a map of it instead:
+| Dropped in | What happens |
+| --- | --- |
+| **`.schem` / `.schematic`** | Opens the crop picker so you can trim it before it lands. |
+| **`.mcworld`** | A Bedrock world export — pick a region on a map of it. |
+| **`.zip` of a Java world** | `level.dat` + `region/*.mca`, as build sites usually ship them. Same picker. |
+| **`.zip` of schematics** | Added as a batch; crop any of them afterwards. |
+| **anything else** | Says what the file actually holds, rather than just refusing it. |
+
+That last row is the point. A world downloaded from a build site has **no single file
+inside that is the build** — the whole folder is, stored as chunks — so "which part of this
+zip do I upload?" has no answer. Now the app reads it and shows you a map instead.
+
+### The picker
 
 ```
-Dropped: suburbia-karma-2025-09-23-4-56-51-am.mcworld
-  1,780 subchunks · 111,670 built blocks
+Dropped: suburban-house.zip
+  Java world · swiat na foty · 5,814 chunks · 4,593 built blocks
 
   ┌──────────────────────────────────────┐
   │   ▩▩   trees    ▩▩▩        ▩▩       │   top-down render, coloured
   │  ▩▩▩  ┌───────┐  road  ▩▩▩▩▩   ▩    │   by block. drag a box over
-  │   ▩▩  │ house  │ ▩▩▩       ▩▩  ▩▩▩  │   one house.
+  │   ▩▩  │ house  │ ▩▩▩       ▩▩  ▩▩▩  │   what you want.
   │  ▩▩▩  └───────┘  ▩▩▩▩   ▩▩▩▩▩       │
   └──────────────────────────────────────┘
-  selection 51x34x51 · 88,434 blocks
+  selection 43x24x33 · 34,056 blocks
   [ Save this region as a build ]
 ```
 
-The blue box is drawn where the world **looked built** — everything that isn't air or the
-flat ground plate of bedrock/dirt/grass. That detection isn't a convenience, it's what
-makes the file importable at all: the example world above is 672 × 48 × 624 =
-**20,127,744 blocks**, past the 16,000,000 limit, while the built area is 210 × 34 × 205 =
-**1,463,700**. Narrow it to one house from there.
+The blue box starts on what **looked built** — everything that isn't air or the flat ground
+plate of bedrock/dirt/grass. For a world that detection is what makes the file importable
+at all: a Bedrock export measured here is 672 × 48 × 624 = **20,127,744 blocks**, past the
+16,000,000 limit, while its built area is **1,463,700**. For a schematic it just skips the
+ground and empty air the selection was drawn with; **Use everything** keeps it exactly as
+dropped.
 
-Once saved it's an ordinary build — a Sponge `.schem` like any other — so thumbnails,
-screenshots, the AI image and TRELLIS pairing all work unchanged.
+Dropping **one** file opens the picker. Dropping **several** keeps the fast batch list —
+being walked through a picker twenty times would cost more than the slack it saves.
 
-### What survives the conversion, and what doesn't
+### Re-cropping
 
-**Block names come across.** Modern Bedrock uses the same `minecraft:<name>` vocabulary as
-Java — `quartz_stairs`, `oak_log`, `deepslate_tile_stairs` are identical — so
-`mcworld_convert.NAME_ALIASES` is a short exceptions table rather than a second
-`legacy_blocks`. It covers the genuine differences (`noteblock` → `note_block`,
-`wooden_door` → `oak_door`, `darkoak_wall_sign` → `dark_oak_wall_sign`).
+Every imported build keeps the uncropped input beside the crop:
 
-**Block states do not.** Bedrock spells them differently (`weirdo_direction` for stair
-facing, `upside_down_bit` for slab halves), and translating them faithfully is a table the
-size of `legacy_blocks`. Every block therefore lands in its **default state**: shapes,
-materials and colours are right, but a staircase may face the wrong way. That's what the
-thumbnails and TRELLIS need, and the conversion records it in the build's notes rather than
-pretending otherwise. Block entities — chest contents, sign text, banner colours — are
-dropped for the same reason.
+```
+data/builds/16__grannit-primrose/
+  schem/source.schem     ← uncropped: the whole schematic, or the world's built area
+  schem/original.schem   ← the crop, which is what the build IS
+  meta.json              ← crop: {min_x: …} in the source's own coordinates
+```
 
-### How it's read
+**Re-crop this build** on the build page re-cuts from that source, so a box drawn too tight
+can be **widened**, not only narrowed. The build keeps its id, name, notes, source URL,
+screenshots, AI image and mesh — only the schematic, its dimensions and its content hash
+change. Builds added before this existed have no source and say so rather than offering a
+control that can't work.
 
-No LevelDB library is involved; the whole path is stdlib `zipfile` + `struct` + `zlib`,
-in `bedrock_world.py`. Three formats stack up:
+The source is cheap: the largest measured here is 64 KB for a 1.46-million-block area.
 
-| Layer | What it is |
-| --- | --- |
-| **SST** | LevelDB's table format: a footer points at an index block, which points at data blocks of prefix-compressed key/value pairs. Mojang adds compression type 4, raw zlib. |
-| **Chunk keys** | `<cx int32 LE><cz int32 LE>[<dim>]<tag>[<subY>]`; tag `0x2F` is a 16×16×16 subchunk. |
-| **Subchunk** | Bit-packed palette indices, then the palette as *little-endian* NBT — Bedrock's byte order, so `nbt_safe`'s Java reader can't be pointed at it. |
+### How worlds are read
 
-One detail worth knowing if you ever touch this: SST stores **internal** keys — the user key
-plus an 8-byte sequence/type trailer. Forget to strip it and every key is 8 bytes too long
-and nothing matches the chunk layout at all.
+No Minecraft library is involved — it's stdlib `zipfile` + `struct` + `zlib` + `nbtlib`.
+
+**Bedrock** (`bedrock_world.py`) is the harder one: LevelDB SST tables holding bit-packed
+subchunks with **little-endian** NBT palettes. Two details worth knowing if you touch it —
+SST stores *internal* keys (the user key plus an 8-byte sequence/type trailer, which must
+be stripped), and Mojang adds compression type 4, raw zlib.
+
+**Java** (`java_world.py`) is friendlier: Anvil region files of big-endian NBT, which
+`nbtlib` reads directly. Two version differences matter, and both are silent when got
+wrong: **1.16** stopped letting a block index span two longs, and **1.18** moved sections
+from `Level.Sections` to a top-level `sections`. Both layouts are handled, chosen by the
+chunk's own `DataVersion`.
+
+> Java indexes blocks within a chunk **YZX**; Bedrock indexes them **XZY**. They look
+> interchangeable and are not — decoding one as the other swaps X and Y, which renders as a
+> build sliced into stripes one chunk apart. `java_world` converts to one convention on the
+> way in so nothing downstream has to care.
+
+Block names are already shared between the two editions, so `mcworld_convert.NAME_ALIASES`
+is a short exceptions table. **Block states are dropped** — Bedrock spells them differently
+and translating them faithfully is a table the size of `legacy_blocks` — so every block
+lands in its default state: shapes, materials and colours are right, a staircase may face
+the wrong way. The conversion records that in the build's notes.
 
 World files get the same distrust as everything else here: entry counts, uncompressed size,
-decompressed block size, record counts and palette lengths are all capped before anything is
+region and chunk sizes, record counts and palette lengths are all capped before anything is
 allocated, and archive entry names are matched exactly rather than joined onto a path, so a
-`../../` entry is simply never a name it looks for.
+`../../` entry is never a name that gets looked for.
 
 ## Safety of downloaded files
 
@@ -627,6 +660,7 @@ migration so far:
 | --- | --- |
 | **1 → 2** | Added the image stage and `source_url`. Status went from `needs_trellis`/`paired` to `needs_image`/`needs_trellis`/`complete`. |
 | **2 → 3** | Split that single image into **reference screenshots** (new `shots` table, up to 3) and the **AI-generated image**. `image/reference.png` is renamed to `image/generated.png`. |
+| **3 → 4** | Added `source_path` and `crop`, so an imported build keeps its uncropped original and can be re-cropped. Purely additive — two nullable columns, no table rebuild. |
 
 **v1 → v2** changes the status `CHECK` constraint, and SQLite can only do that by rebuilding
 the table — so it is a real table rewrite, done in one transaction. A crash mid-migration

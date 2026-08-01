@@ -48,15 +48,8 @@ BLOCKS_PER_SUBCHUNK = 4096
 # rather than a format we don't know, because the set has never changed.
 VALID_BITS = (1, 2, 3, 4, 5, 6, 8, 16)
 
-# What counts as "not part of the build" when locating it automatically. A creative build
-# sits on a flat plate of these; including them would blow past the schematic volume limit
-# and bury the thing you actually want.
-GROUND_BLOCKS = frozenset({
-    "minecraft:air", "minecraft:cave_air", "minecraft:void_air",
-    "minecraft:bedrock", "minecraft:dirt", "minecraft:grass_block",
-    "minecraft:water", "minecraft:flowing_water", "minecraft:lava",
-})
-AIR_BLOCKS = frozenset({"minecraft:air", "minecraft:cave_air", "minecraft:void_air"})
+# Re-exported so callers that already import them from here keep working.
+from voxel_world import AIR_BLOCKS, GROUND_BLOCKS, VoxelWorld  # noqa: E402
 
 __all__ = ["WorldError", "BedrockWorld", "open_world", "GROUND_BLOCKS", "AIR_BLOCKS"]
 
@@ -324,137 +317,11 @@ def _decode_subchunk(payload: bytes) -> Optional[tuple[list[str], list[int]]]:
 
 # ── The world ─────────────────────────────────────────────────────────────────
 
-class BedrockWorld:
-    """A parsed Bedrock world, held as decoded subchunks keyed by (cx, cz, subY)."""
+class BedrockWorld(VoxelWorld):
+    """A parsed Bedrock world. The geometry lives in VoxelWorld, shared with Java."""
 
     def __init__(self, subchunks: dict, level_name: str = ""):
-        self.subchunks = subchunks
-        self.level_name = level_name
-
-    # ── Extent ────────────────────────────────────────────────────────────────
-
-    def world_bounds(self) -> dict:
-        """Block-space extent of every subchunk present, built or not."""
-        if not self.subchunks:
-            raise WorldError("This world has no block data.", code="empty_world")
-        xs = [cx for cx, _cz, _sy in self.subchunks]
-        zs = [cz for _cx, cz, _sy in self.subchunks]
-        ys = [sy for _cx, _cz, sy in self.subchunks]
-        return {
-            "min_x": min(xs) * 16, "max_x": max(xs) * 16 + 15,
-            "min_y": min(ys) * 16, "max_y": max(ys) * 16 + 15,
-            "min_z": min(zs) * 16, "max_z": max(zs) * 16 + 15,
-        }
-
-    def _interesting_mask(self, names, indices, skip):
-        """Boolean mask over a subchunk's 4096 blocks: True where the name isn't skipped.
-
-        Tested per *palette entry* and then indexed, not per block -- a palette is tens of
-        names where the subchunk is 4096 blocks.
-        """
-        import numpy as np
-
-        keep = np.array([name not in skip for name in names], dtype=bool)
-        safe = np.where(indices < len(names), indices, 0)
-        return keep[safe] & (indices < len(names))
-
-    def auto_bbox(self, skip=GROUND_BLOCKS) -> Optional[dict]:
-        """Bounding box of the built area: everything that isn't air or ground plate.
-
-        This is what makes a world importable at all. A flat creative world is mostly a
-        plate of bedrock/dirt/grass whose full extent runs past the schematic volume limit;
-        the part worth keeping is a fraction of it.
-        """
-        import numpy as np
-
-        # Block position within a subchunk is packed as (x << 8) | (z << 4) | y.
-        positions = np.arange(BLOCKS_PER_SUBCHUNK)
-        local_x = (positions >> 8) & 15
-        local_y = positions & 15
-        local_z = (positions >> 4) & 15
-
-        lo = [None, None, None]
-        hi = [None, None, None]
-        count = 0
-        for (cx, cz, sy), (names, indices) in self.subchunks.items():
-            mask = self._interesting_mask(names, indices, skip)
-            if not mask.any():
-                continue
-            count += int(mask.sum())
-            for axis, (local, base) in enumerate(
-                    ((local_x, cx * 16), (local_y, sy * 16), (local_z, cz * 16))):
-                present = local[mask]
-                low = base + int(present.min())
-                high = base + int(present.max())
-                if lo[axis] is None or low < lo[axis]:
-                    lo[axis] = low
-                if hi[axis] is None or high > hi[axis]:
-                    hi[axis] = high
-        if count == 0:
-            return None
-        return {"min_x": lo[0], "max_x": hi[0],
-                "min_y": lo[1], "max_y": hi[1],
-                "min_z": lo[2], "max_z": hi[2], "blocks": count}
-
-    # ── Extraction ────────────────────────────────────────────────────────────
-
-    def extract_region(self, bbox: dict):
-        """Return (grid, names) for a region, in Sponge's YZX order.
-
-        `grid` is a numpy array of palette indices shaped (height, length, width), which is
-        exactly what the Sponge writer wants -- no transpose needed downstream.
-        """
-        import numpy as np
-
-        x0, x1 = sorted((int(bbox["min_x"]), int(bbox["max_x"])))
-        y0, y1 = sorted((int(bbox["min_y"]), int(bbox["max_y"])))
-        z0, z1 = sorted((int(bbox["min_z"]), int(bbox["max_z"])))
-        width, height, length = x1 - x0 + 1, y1 - y0 + 1, z1 - z0 + 1
-
-        palette = {"minecraft:air": 0}
-        names = ["minecraft:air"]
-        grid = np.zeros((height, length, width), dtype=np.uint16)
-
-        for (cx, cz, sy), (sub_names, indices) in self.subchunks.items():
-            # Skip whole subchunks that cannot overlap the region.
-            if cx * 16 > x1 or cx * 16 + 15 < x0:
-                continue
-            if cz * 16 > z1 or cz * 16 + 15 < z0:
-                continue
-            if sy * 16 > y1 or sy * 16 + 15 < y0:
-                continue
-            base_x, base_y, base_z = cx * 16, sy * 16, cz * 16
-            mask = self._interesting_mask(sub_names, indices, AIR_BLOCKS)
-            if not mask.any():
-                continue
-
-            positions = np.nonzero(mask)[0]
-            xs = base_x + ((positions >> 8) & 15)
-            ys = base_y + (positions & 15)
-            zs = base_z + ((positions >> 4) & 15)
-            inside = ((xs >= x0) & (xs <= x1) & (ys >= y0) & (ys <= y1)
-                      & (zs >= z0) & (zs <= z1))
-            if not inside.any():
-                continue
-            positions, xs, ys, zs = positions[inside], xs[inside], ys[inside], zs[inside]
-
-            # Map this subchunk's palette onto the region's shared one, then write every
-            # block in one indexed assignment. Only the entries actually used by blocks
-            # inside the region are carried over -- a subchunk usually straddles the
-            # boundary, and adopting its whole palette would pad the schematic with blocks
-            # the region does not contain.
-            local_indices = indices[positions]
-            local = np.zeros(len(sub_names), dtype=np.uint16)
-            for index in np.unique(local_indices):
-                name = sub_names[int(index)]
-                slot = palette.get(name)
-                if slot is None:
-                    slot = len(names)
-                    palette[name] = slot
-                    names.append(name)
-                local[index] = slot
-            grid[ys - y0, zs - z0, xs - x0] = local[local_indices]
-        return grid, names
+        super().__init__(subchunks, level_name, source_label="Bedrock world")
 
 
 def open_world(path) -> BedrockWorld:

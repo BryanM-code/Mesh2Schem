@@ -33,7 +33,7 @@ DATA_DIR = PROJECT_ROOT / "data"
 DB_PATH = DATA_DIR / "collector.db"
 BUILDS_DIR = DATA_DIR / "builds"
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # A build is collected in four steps, because TRELLIS takes a photo-real 2D image rather
 # than a schematic:
@@ -77,7 +77,7 @@ MACHINE_ID = int(os.environ.get("BDC_MACHINE_ID", "0") or 0)
 # conflicting over one binary database.
 META_FILENAME = "meta.json"
 META_FIELDS = ("name", "source_note", "source_url", "variant_no",
-               "added_at", "image_at", "paired_at")
+               "added_at", "image_at", "paired_at", "crop")
 
 
 def derive_status(has_image: bool, has_glb: bool) -> str:
@@ -153,6 +153,8 @@ CREATE TABLE IF NOT EXISTS builds (
   variant_no  INTEGER NOT NULL DEFAULT 0,
   w INTEGER NOT NULL, h INTEGER NOT NULL, l INTEGER NOT NULL,
   schem_path  TEXT    NOT NULL,
+  source_path TEXT,
+  crop        TEXT,
   image_path  TEXT,
   glb_path    TEXT,
   added_at    TEXT    NOT NULL,
@@ -214,6 +216,8 @@ def _migrate(conn: sqlite3.Connection, from_version: int) -> None:
         _migrate_v1_to_v2(conn)
     if from_version < 3:
         _migrate_v2_to_v3(conn)
+    if from_version < 4:
+        _migrate_v3_to_v4(conn)
     conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
 
 
@@ -263,6 +267,20 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_builds_status ON builds(status);
         """
     )
+
+
+def _migrate_v3_to_v4(conn: sqlite3.Connection) -> None:
+    """v4 keeps the uncropped input beside the build, so a crop can be redrawn.
+
+    Purely additive -- two nullable columns -- so unlike v1 -> v2 this needs no table
+    rebuild. Existing builds have no source and no crop, which reads correctly as "this
+    build is the whole of what was dropped".
+    """
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(builds)")}
+    if "source_path" not in existing:
+        conn.execute("ALTER TABLE builds ADD COLUMN source_path TEXT")
+    if "crop" not in existing:
+        conn.execute("ALTER TABLE builds ADD COLUMN crop TEXT")
 
 
 def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
@@ -401,6 +419,9 @@ def row_to_dict(row: sqlite3.Row, conn: Optional[sqlite3.Connection] = None) -> 
         "longest": max(w, h, l),
         "dims": "{}x{}x{}".format(w, h, l),
         "schem_path": row["schem_path"],
+        "source_path": row["source_path"],
+        "crop": json.loads(row["crop"]) if row["crop"] else None,
+        "can_recrop": bool(row["source_path"]),
         "image_path": row["image_path"],
         "glb_path": row["glb_path"],
         "has_image": bool(row["image_path"]),
@@ -423,7 +444,8 @@ def find_by_hash(conn: sqlite3.Connection, schem_hash: str) -> list[dict]:
 
 def create_build(name: str, source_note: str, temp_schem_path,
                  schem_hash: str, dims: tuple[int, int, int],
-                 allow_duplicate: bool = False, source_url: str = "") -> dict:
+                 allow_duplicate: bool = False, source_url: str = "",
+                 temp_source_path=None, crop: Optional[dict] = None) -> dict:
     """Insert a build row and COPY the schem into data/builds/<id>__<slug>/schem/.
 
     Raises DuplicateBuildError (with the existing rows) when the hash already exists and
@@ -448,10 +470,11 @@ def create_build(name: str, source_note: str, temp_schem_path,
         conn.execute(
             """INSERT INTO builds
                (id, name, slug, source_note, source_url, status, schem_hash, variant_no,
-                w, h, l, schem_path, image_path, glb_path, added_at, image_at, paired_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', NULL, NULL, ?, NULL, NULL)""",
+                w, h, l, schem_path, source_path, crop, image_path, glb_path,
+                added_at, image_at, paired_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', NULL, ?, NULL, NULL, ?, NULL, NULL)""",
             (build_id, name, slug, source_note, source_url, STATUS_NEEDS_IMAGE, schem_hash,
-             variant_no, w, h, l, _now_iso()),
+             variant_no, w, h, l, json.dumps(crop) if crop else None, _now_iso()),
         )
 
         folder = build_dir(build_id, slug)
@@ -464,8 +487,16 @@ def create_build(name: str, source_note: str, temp_schem_path,
             raise FileExistsError("A schem already exists at {}".format(dest))
         shutil.copyfile(temp_schem_path, dest)  # COPY, never move
 
-        conn.execute("UPDATE builds SET schem_path = ? WHERE id = ?",
-                     (_rel(dest), build_id))
+        # The uncropped input, kept beside the build so its crop can be redrawn later --
+        # widened, not just narrowed. Absent when the build is the whole of what arrived.
+        source_rel = None
+        if temp_source_path is not None:
+            source_dest = schem_folder / "source.schem"
+            shutil.copyfile(temp_source_path, source_dest)
+            source_rel = _rel(source_dest)
+
+        conn.execute("UPDATE builds SET schem_path = ?, source_path = ? WHERE id = ?",
+                     (_rel(dest), source_rel, build_id))
         conn.commit()
         row = conn.execute("SELECT * FROM builds WHERE id = ?", (build_id,)).fetchone()
         write_meta(row_to_dict(row, conn))
@@ -528,6 +559,86 @@ def get_build(build_id: int) -> Optional[dict]:
         return row_to_dict(row, conn) if row else None
     finally:
         conn.close()
+
+
+# ── Re-crop ───────────────────────────────────────────────────────────────────
+
+class NoSourceError(Exception):
+    """Raised when a build has no uncropped source to re-cut from."""
+
+
+def recrop_build(build_id: int, bbox: dict) -> dict:
+    """Re-cut a build's schematic from its stored uncropped source.
+
+    This is why `source.schem` is kept: a box drawn slightly too tight can be widened
+    again, not just narrowed. The build keeps its id, name, notes, screenshots and mesh --
+    only the schematic, its dimensions and its content hash change.
+    """
+    import mcworld_convert
+    import schem_source
+
+    conn = connect()
+    try:
+        row = conn.execute("SELECT * FROM builds WHERE id = ?", (build_id,)).fetchone()
+        if row is None:
+            raise BuildNotFoundError(build_id)
+        if not row["source_path"]:
+            raise NoSourceError(build_id)
+
+        folder = build_dir(build_id, row["slug"])
+        source = folder / "schem" / "source.schem"
+        if not source.exists():
+            raise NoSourceError(build_id)
+
+        world = schem_source.load_schem_source(source)
+        grid, names = world.extract_region(bbox)
+        target = folder / "schem" / "original.schem"
+        temp = target.with_name("original.recrop.schem")
+        info = mcworld_convert.region_to_schem(grid, names, temp)
+
+        new_hash = sha256_file(temp)
+        # The crop defines the build's content, so re-cropping changes its hash -- which
+        # could collide with another build. Take the next free variant rather than failing
+        # an edit the user has already committed to.
+        variant = row["variant_no"]
+        clash = conn.execute(
+            "SELECT 1 FROM builds WHERE schem_hash = ? AND variant_no = ? AND id != ?",
+            (new_hash, variant, build_id)).fetchone()
+        if clash:
+            highest = conn.execute(
+                "SELECT COALESCE(MAX(variant_no), -1) AS mx FROM builds WHERE schem_hash = ?",
+                (new_hash,)).fetchone()["mx"]
+            variant = highest + 1
+
+        os.replace(temp, target)
+        conn.execute(
+            """UPDATE builds SET w = ?, h = ?, l = ?, schem_hash = ?, variant_no = ?,
+               crop = ? WHERE id = ?""",
+            (info["width"], info["height"], info["length"], new_hash, variant,
+             json.dumps(_normalised_crop(bbox)), build_id))
+        conn.commit()
+        _sync_meta(conn, build_id)
+        result = row_to_dict(conn.execute("SELECT * FROM builds WHERE id = ?",
+                                          (build_id,)).fetchone(), conn)
+    finally:
+        conn.close()
+
+    # The thumbnail depicts the old crop, so drop it; it re-renders on next view.
+    thumb = build_dir(build_id, row["slug"]) / "thumb" / "schem.png"
+    try:
+        if BUILDS_DIR in thumb.resolve().parents:
+            thumb.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return result
+
+
+def _normalised_crop(bbox: dict) -> dict:
+    """A crop box with min/max the right way round, so a backwards drag still reads right."""
+    x0, x1 = sorted((int(bbox["min_x"]), int(bbox["max_x"])))
+    y0, y1 = sorted((int(bbox["min_y"]), int(bbox["max_y"])))
+    z0, z1 = sorted((int(bbox["min_z"]), int(bbox["max_z"])))
+    return {"min_x": x0, "max_x": x1, "min_y": y0, "max_y": y1, "min_z": z0, "max_z": z1}
 
 
 # ── Update editable metadata ──────────────────────────────────────────────────

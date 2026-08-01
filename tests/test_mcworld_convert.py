@@ -34,8 +34,8 @@ import server  # noqa: E402
 from schem_meta import sha256_file  # noqa: E402
 
 server.TMP_DIR = SANDBOX / ".tmp"
-server.WORLD_DIR = server.TMP_DIR / "mcworld"
-server.WORLD_DIR.mkdir(parents=True, exist_ok=True)
+server.IMPORT_DIR = server.TMP_DIR / "import"
+server.IMPORT_DIR.mkdir(parents=True, exist_ok=True)
 db.init_db()
 
 
@@ -205,15 +205,15 @@ class ImportEndpointTests(unittest.TestCase):
         db.DB_PATH = self.tmp / "collector.db"
         db.BUILDS_DIR = self.tmp / "builds"
         server.TMP_DIR = self.tmp / ".tmp"
-        server.WORLD_DIR = server.TMP_DIR / "mcworld"
-        server.WORLD_DIR.mkdir(parents=True, exist_ok=True)
+        server.IMPORT_DIR = server.TMP_DIR / "import"
+        server.IMPORT_DIR.mkdir(parents=True, exist_ok=True)
         db.init_db()
 
     def upload(self, path=None, name="world.mcworld"):
         path = path or fx.flat_world(self.tmp / "w.mcworld", chunks=2)
         payload = Path(path).read_bytes()
-        return self.client.post("/api/mcworld/inspect",
-                                data={"world": (io.BytesIO(payload), name)},
+        return self.client.post("/api/import/inspect",
+                                data={"file": (io.BytesIO(payload), name)},
                                 content_type="multipart/form-data")
 
     def test_inspect_reports_the_world_and_where_the_build_is(self):
@@ -222,19 +222,20 @@ class ImportEndpointTests(unittest.TestCase):
         body = res.get_json()
         self.assertIn("token", body)
         self.assertEqual(body["auto_bbox"]["blocks"], 3)
+        self.assertEqual(body["kind"], "bedrock_world")
         self.assertEqual(body["suggested"]["dims"], "1x3x1")
         self.assertFalse(body["suggested"]["too_big"])
         self.assertIn("map_bounds", body, "the client needs the map's coordinate frame")
 
     def test_a_non_mcworld_is_refused(self):
-        res = self.client.post("/api/mcworld/inspect",
-                               data={"world": (io.BytesIO(b"x"), "thing.schem")},
+        res = self.client.post("/api/import/inspect",
+                               data={"file": (io.BytesIO(b"x"), "thing.schem")},
                                content_type="multipart/form-data")
         self.assertEqual(res.status_code, 400)
 
     def test_a_broken_world_is_refused_with_a_code(self):
-        res = self.client.post("/api/mcworld/inspect",
-                               data={"world": (io.BytesIO(b"not a zip"), "w.mcworld")},
+        res = self.client.post("/api/import/inspect",
+                               data={"file": (io.BytesIO(b"not a zip"), "w.mcworld")},
                                content_type="multipart/form-data")
         self.assertEqual(res.status_code, 400)
         self.assertEqual(res.get_json()["code"], "not_a_zip")
@@ -249,7 +250,7 @@ class ImportEndpointTests(unittest.TestCase):
 
     def test_region_reports_dimensions_without_saving(self):
         token = self.upload().get_json()["token"]
-        res = self.client.post("/api/mcworld/{}/region".format(token),
+        res = self.client.post("/api/import/{}/region".format(token),
                                json={"min_x": 0, "max_x": 9, "min_y": 0, "max_y": 4,
                                      "min_z": 0, "max_z": 9})
         self.assertEqual(res.get_json()["dims"], "10x5x10")
@@ -257,20 +258,20 @@ class ImportEndpointTests(unittest.TestCase):
 
     def test_an_oversized_region_is_flagged_before_saving(self):
         token = self.upload().get_json()["token"]
-        res = self.client.post("/api/mcworld/{}/region".format(token),
+        res = self.client.post("/api/import/{}/region".format(token),
                                json={"min_x": 0, "max_x": 3000, "min_y": 0, "max_y": 300,
                                      "min_z": 0, "max_z": 3000})
         self.assertTrue(res.get_json()["too_big"])
 
     def test_a_malformed_region_is_refused(self):
         token = self.upload().get_json()["token"]
-        res = self.client.post("/api/mcworld/{}/region".format(token),
+        res = self.client.post("/api/import/{}/region".format(token),
                                json={"min_x": "left"})
         self.assertEqual(res.status_code, 400)
 
     def test_saving_creates_a_normal_build(self):
         body = self.upload().get_json()
-        res = self.client.post("/api/mcworld/{}/save".format(body["token"]),
+        res = self.client.post("/api/import/{}/save".format(body["token"]),
                                json=dict(body["auto_bbox"], name="Tower"))
         self.assertEqual(res.status_code, 201)
         build = res.get_json()["build"]
@@ -283,7 +284,7 @@ class ImportEndpointTests(unittest.TestCase):
 
     def test_the_conversion_warning_lands_in_the_note(self):
         body = self.upload().get_json()
-        res = self.client.post("/api/mcworld/{}/save".format(body["token"]),
+        res = self.client.post("/api/import/{}/save".format(body["token"]),
                                json=dict(body["auto_bbox"], name="Tower",
                                          source_note="from a friend"))
         note = res.get_json()["build"]["source_note"]
@@ -292,18 +293,18 @@ class ImportEndpointTests(unittest.TestCase):
 
     def test_the_same_region_twice_is_a_duplicate(self):
         body = self.upload().get_json()
-        first = self.client.post("/api/mcworld/{}/save".format(body["token"]),
+        first = self.client.post("/api/import/{}/save".format(body["token"]),
                                  json=dict(body["auto_bbox"], name="One"))
         self.assertEqual(first.status_code, 201)
-        second = self.client.post("/api/mcworld/{}/save".format(body["token"]),
+        second = self.client.post("/api/import/{}/save".format(body["token"]),
                                   json=dict(body["auto_bbox"], name="Two"))
         self.assertEqual(second.status_code, 409, "deterministic output should dedup")
         self.assertEqual(second.get_json()["error"], "duplicate")
 
     def test_discarding_forgets_the_upload(self):
         token = self.upload().get_json()["token"]
-        self.assertEqual(self.client.delete("/api/mcworld/{}".format(token)).status_code, 200)
-        res = self.client.post("/api/mcworld/{}/region".format(token),
+        self.assertEqual(self.client.delete("/api/import/{}".format(token)).status_code, 200)
+        res = self.client.post("/api/import/{}/region".format(token),
                                json={"min_x": 0, "max_x": 1, "min_y": 0, "max_y": 1,
                                      "min_z": 0, "max_z": 1})
         self.assertEqual(res.status_code, 404)
@@ -311,7 +312,7 @@ class ImportEndpointTests(unittest.TestCase):
     def test_a_bogus_token_is_never_used_as_a_path(self):
         for token in ("../../etc", "..", "zzz", "a" * 31, "../" * 8 + "collector.db"):
             with self.subTest(token=token):
-                res = self.client.get("/api/mcworld/{}/preview.png".format(token))
+                res = self.client.get("/api/import/{}/preview.png".format(token))
                 self.assertIn(res.status_code, (404, 308))
                 res.close()
 
