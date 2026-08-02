@@ -31,8 +31,9 @@ exist, and names the first one still missing.
   converted on the way in; a zip with nothing usable in it tells you what it does hold.
   Several files at once skip the picker and add as a batch. Content is sha256-hashed and
   dedup-checked, and your originals are **copied in, never moved or deleted**.
-- **Re-crop** — drew the box wrong? The uncropped input is kept, so a crop can be redrawn
-  later and **widened**, not just narrowed.
+- **Crop any build, any time** — including ones added before cropping existed. Trim the
+  yard and driveway off an oversized build from its own page; imported builds keep their
+  uncropped input so the box can be **widened** as well as narrowed.
 - **Library** — every build as a **thumbnail grid** or a searchable / filterable / sortable
   table (your choice is remembered), with stage badges, progress pips and a CSV export.
 - **Reference screenshots** — up to 3 quick captures per build. **Paste straight from the
@@ -228,24 +229,48 @@ dropped.
 Dropping **one** file opens the picker. Dropping **several** keeps the fast batch list —
 being walked through a picker twenty times would cost more than the slack it saves.
 
-### Re-cropping
+### Cropping, including builds added earlier
 
-Every imported build keeps the uncropped input beside the crop:
+**Every build can be cropped**, whether or not it was imported through the picker. Open it
+and use **Crop this build**: you get a plan view of the schematic with a draggable box, the
+same one the importer uses.
 
 ```
-data/builds/16__grannit-primrose/
-  schem/source.schem     ← uncropped: the whole schematic, or the world's built area
+chaparalsthome — 261x89x87
+
+  ┌────────────────────────────────────────────────────┐
+  │  ~pool~   ▓▓▓▓▓▓▓▓ mansion ▓▓▓▓    ≡tennis≡   ~~~  │   drag a box round the
+  │  ~~~~~~   ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓    ≡≡≡≡≡≡≡≡   ~~~  │   house and leave the
+  │  drive    ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓      trees    ~~~  │   yard behind
+  └────────────────────────────────────────────────────┘
+  [ Trim to the build ]  [ Use everything ]
+```
+
+**Trim to the build** snaps the box to everything that isn't air or ground plate, which
+usually strips a lot of empty sky on its own — 89 → 52 blocks tall for the build above.
+
+Imported builds keep their uncropped input at `schem/source.schem`, so their box can be
+**widened** as well as narrowed. A build that predates that has only its own schematic —
+still perfectly croppable, since trimming never needed anything more than the build itself.
+The first crop of such a build **copies its current schematic to `source.schem` before
+cutting**, so that crop is undoable too and every one after it behaves identically.
+
+```
+data/builds/12__chaparalsthome/
+  schem/source.schem     ← the uncropped original (written on first crop if absent)
   schem/original.schem   ← the crop, which is what the build IS
   meta.json              ← crop: {min_x: …} in the source's own coordinates
 ```
 
-**Re-crop this build** on the build page re-cuts from that source, so a box drawn too tight
-can be **widened**, not only narrowed. The build keeps its id, name, notes, source URL,
-screenshots, AI image and mesh — only the schematic, its dimensions and its content hash
-change. Builds added before this existed have no source and say so rather than offering a
-control that can't work.
+Cropping keeps the build's id, name, notes, source URL, screenshots, AI image and mesh —
+only the schematic, its dimensions and its content hash change. The source is cheap: the
+largest measured here is 64 KB for a 1.46-million-block area.
 
-The source is cheap: the largest measured here is 64 KB for a 1.46-million-block area.
+> A Sponge palette does **not** have to put air in slot 0 — one build in this library has
+> `minecraft:stone` there. Since chunks are 16 blocks a side, a schematic whose dimensions
+> aren't multiples of 16 leaves padding in its last chunk, and padding is index 0. Reading
+> that as-is turned the padding into columns of phantom stone and pushed the suggested crop
+> past the schematic's own edges. `schem_source` guarantees air at slot 0 for this reason.
 
 ### How worlds are read
 

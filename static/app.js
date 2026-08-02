@@ -153,7 +153,7 @@ const recropBuild = (id, bbox) => api("/api/builds/" + id + "/recrop", asJson(bb
 // when the server starts. Leave a server running while the code changes and you get a new
 // frontend talking to an old API — controls whose data never arrives would just quietly
 // not appear. Rather than let that happen silently, check once and say so.
-const EXPECTED_API_VERSION = 3;
+const EXPECTED_API_VERSION = 6;
 
 function checkServerFreshness() {
   api("/api/meta")
@@ -1251,13 +1251,19 @@ function recropSection(b) {
 
   if (!b.can_recrop) {
     wrap.append(h("p", { class: "panel-sub muted" },
-      "This build was added before the uncropped original was kept, so there is nothing "
-      + "to re-cut from. Re-import the file to be able to crop it."));
+      "This build has no schematic file to cut from."));
     return wrap;
   }
 
+  wrap.append(h("p", { class: "panel-sub" },
+    b.has_stored_source
+      ? "The uncropped original is kept, so the box can be widened as well as narrowed."
+      : "Trim the yard, driveway or empty ground off this build. The first crop keeps a "
+        + "copy of it as it is now, so it can be undone or redrawn afterwards."));
+
   const details = h("details", { class: "recrop" },
-    h("summary", { class: "muted" }, "Re-crop this build"));
+    h("summary", { class: "muted" },
+      b.has_stored_source ? "Re-crop this build" : "Crop this build"));
   const body = h("div", { class: "recrop-body" },
     h("div", {}, h("span", { class: "spin" }), " Loading the original…"));
   details.append(body);
@@ -1310,12 +1316,22 @@ function buildRecropUI(body, b, info) {
       });
   });
 
+  const suggest = h("button", { class: "btn btn-ghost btn-sm" }, "Trim to the build");
+  suggest.addEventListener("click", () => {
+    Object.assign(box, info.suggested);
+    delete box.blocks;
+    refresh();
+  });
+
   body.replaceChildren(
     h("p", { class: "panel-sub" },
-      "This is the whole of what was imported. Drag a new box — you can widen it as well "
-      + "as narrow it. Screenshots, the AI image and the mesh all stay attached."),
+      (info.has_stored_source
+        ? "This is the whole of what was imported. Drag a new box — you can widen it as "
+          + "well as narrow it. "
+        : "This is the build as it stands. Drag a box to trim it down. ")
+      + "Screenshots, the AI image and the mesh all stay attached."),
     stage,
-    h("div", { class: "world-controls" }, controls.fields, wholeBtn),
+    h("div", { class: "world-controls" }, controls.fields, suggest, wholeBtn),
     readout,
     h("div", { class: "row-actions" }, applyBtn));
   refresh();

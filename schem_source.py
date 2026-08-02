@@ -11,7 +11,7 @@ handful of array writes.
 from __future__ import annotations
 
 from bedrock_world import WorldError
-from voxel_world import VoxelWorld
+from voxel_world import AIR_BLOCKS, VoxelWorld
 
 __all__ = ["SchematicSource", "load_schem_source"]
 
@@ -22,6 +22,21 @@ class SchematicSource(VoxelWorld):
     def __init__(self, subchunks: dict, level_name: str = "", dims=(0, 0, 0)):
         super().__init__(subchunks, level_name, source_label="schematic")
         self.dims = dims
+
+    def auto_bbox(self, skip=None):
+        """The built area, clamped to the schematic's real dimensions.
+
+        The chunked form rounds up to 16-block boundaries, so a box derived from it can
+        otherwise point past the end of a schematic that isn't a multiple of 16.
+        """
+        box = super().auto_bbox() if skip is None else super().auto_bbox(skip)
+        if box is None:
+            return None
+        limit = self.world_bounds()
+        for axis in ("x", "y", "z"):
+            box["min_" + axis] = max(box["min_" + axis], limit["min_" + axis])
+            box["max_" + axis] = min(box["max_" + axis], limit["max_" + axis])
+        return box
 
     def croppable_extent(self) -> dict:
         """The whole schematic, not its trimmed contents.
@@ -56,6 +71,15 @@ def load_schem_source(path) -> SchematicSource:
     grid = voxels.grid                       # (height, length, width), palette indices
     names = list(voxels.names)
     height, length, width = grid.shape
+
+    # Chunks are 16 blocks on a side, so a schematic that isn't a multiple of 16 leaves
+    # padding in the last chunk of each axis. That padding is index 0 -- and a Sponge
+    # palette does NOT have to put air in slot 0. One real build here has `minecraft:stone`
+    # there, which would turn the padding into eleven columns of phantom stone and bake
+    # them into any crop drawn to the edge. Guarantee slot 0 is air.
+    if not names or names[0] not in AIR_BLOCKS:
+        names = ["minecraft:air"] + names
+        grid = grid.astype(np.uint16) + 1
 
     # Chunk it exactly as a world is chunked, in the shared (x << 8) | (z << 4) | y order.
     positions = np.arange(4096)

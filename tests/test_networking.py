@@ -8,6 +8,7 @@ something you asked for explicitly.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -49,6 +50,29 @@ class TailscaleRangeTests(unittest.TestCase):
     def test_a_public_100_address_is_not_mistaken_for_tailscale(self):
         """100.0.0.0/8 is public space; only 100.64/10 is the CGNAT block Tailscale uses."""
         self.assertFalse(server._is_tailscale_ip("100.1.2.3"))
+
+
+class ApiVersionTests(unittest.TestCase):
+    """The staleness banner only works if both halves agree on the number.
+
+    They live in different files and are bumped by hand, so they drift silently: a server
+    bumped without the page means `server > expected`, the comparison is false, and the
+    banner never fires no matter how stale the server actually is. That is exactly what
+    happened between v3 and v5, and it is what this test exists to catch.
+    """
+
+    def frontend_expectation(self) -> int:
+        source = (Path(__file__).resolve().parent.parent / "static" / "app.js").read_text(
+            encoding="utf-8")
+        match = re.search(r"const EXPECTED_API_VERSION\s*=\s*(\d+)", source)
+        self.assertIsNotNone(match, "app.js should declare EXPECTED_API_VERSION")
+        return int(match.group(1))
+
+    def test_the_page_and_the_server_agree_on_the_api_version(self):
+        self.assertEqual(
+            self.frontend_expectation(), server.API_VERSION,
+            "static/app.js EXPECTED_API_VERSION and server.API_VERSION must match; "
+            "bump both together or the stale-server banner stops working")
 
 
 class HostResolutionTests(unittest.TestCase):

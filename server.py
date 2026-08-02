@@ -66,7 +66,7 @@ MCWORLD_EXTENSIONS = (".mcworld",)
 # server left running while the code changes serves a NEW frontend against an OLD API. The
 # frontend checks this number and says so, instead of silently missing controls whose data
 # never arrived.
-API_VERSION = 5
+API_VERSION = 6
 
 # Everything a build can have a picture of. Whitelisted rather than interpolated: the
 # thumbnail route is the only one that reaches into data/builds/, and the path it builds
@@ -635,9 +635,9 @@ def api_build_source_preview(build_id: int):
     build = db.get_build(build_id)
     if build is None:
         return jsonify(error="Build not found."), 404
-    source_file = db.build_dir(build_id, build["slug"]) / "schem" / "source.schem"
-    if not source_file.exists():
-        return jsonify(error="This build has no re-croppable source."), 404
+    source_file = db.croppable_source(build_id, build["slug"])
+    if source_file is None:
+        return jsonify(error="This build has no schematic to crop."), 404
     try:
         source = schem_source.load_schem_source(source_file)
     except import_source.WorldError as exc:
@@ -658,14 +658,18 @@ def api_build_source_bounds(build_id: int):
     build = db.get_build(build_id)
     if build is None:
         return jsonify(error="Build not found."), 404
-    source_file = db.build_dir(build_id, build["slug"]) / "schem" / "source.schem"
-    if not source_file.exists():
-        return jsonify(error="This build has no re-croppable source."), 404
+    source_file = db.croppable_source(build_id, build["slug"])
+    if source_file is None:
+        return jsonify(error="This build has no schematic to crop."), 404
     source = schem_source.load_schem_source(source_file)
     bounds = source.world_bounds()
+    # Without a stored source the build's own schematic is what gets cut, so the current
+    # crop is by definition the whole of it.
+    crop = build.get("crop") if build.get("has_stored_source") else None
     return jsonify(bounds=bounds, map_bounds=bounds,
-                   crop=build.get("crop") or bounds,
-                   current=_region_dims(build.get("crop") or bounds))
+                   has_stored_source=bool(build.get("has_stored_source")),
+                   suggested=source.auto_bbox() or bounds,
+                   crop=crop or bounds, current=_region_dims(crop or bounds))
 
 
 @app.post("/api/builds/<int:build_id>/recrop")
@@ -685,8 +689,7 @@ def api_build_recrop(build_id: int):
         return jsonify(error="Build not found."), 404
     except db.NoSourceError:
         return jsonify(error="no_source",
-                       message="This build was added before crops were kept, so there is "
-                               "no uncropped source to re-cut from."), 409
+                       message="This build has no schematic file to cut from."), 409
     except import_source.WorldError as exc:
         return jsonify(**exc.details()), 400
     _warm_thumb(build, "schem")

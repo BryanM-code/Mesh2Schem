@@ -421,7 +421,10 @@ def row_to_dict(row: sqlite3.Row, conn: Optional[sqlite3.Connection] = None) -> 
         "schem_path": row["schem_path"],
         "source_path": row["source_path"],
         "crop": json.loads(row["crop"]) if row["crop"] else None,
-        "can_recrop": bool(row["source_path"]),
+        # Every build can be cropped: with a stored source the box can also be widened,
+        # and without one the build's own schematic is cut down instead.
+        "can_recrop": True,
+        "has_stored_source": bool(row["source_path"]),
         "image_path": row["image_path"],
         "glb_path": row["glb_path"],
         "has_image": bool(row["image_path"]),
@@ -564,15 +567,36 @@ def get_build(build_id: int) -> Optional[dict]:
 # ── Re-crop ───────────────────────────────────────────────────────────────────
 
 class NoSourceError(Exception):
-    """Raised when a build has no uncropped source to re-cut from."""
+    """Raised when a build has no schematic at all to re-cut from."""
+
+
+def croppable_source(build_id: int, slug: str) -> Optional[Path]:
+    """The file a re-crop should cut from, or None if there is nothing to cut.
+
+    Normally the uncropped `source.schem` kept at import. Builds added before that existed
+    have only `original.schem` -- which is still a perfectly good thing to crop, because
+    trimming a build down never needed anything more than the build itself. The only thing
+    it cannot do is widen past its own edges, and there is nothing out there to widen to.
+    """
+    schem_folder = build_dir(build_id, slug) / "schem"
+    source = schem_folder / "source.schem"
+    if source.exists():
+        return source
+    original = schem_folder / "original.schem"
+    return original if original.exists() else None
 
 
 def recrop_build(build_id: int, bbox: dict) -> dict:
-    """Re-cut a build's schematic from its stored uncropped source.
+    """Re-cut a build's schematic, from its stored source or from the build itself.
 
-    This is why `source.schem` is kept: a box drawn slightly too tight can be widened
-    again, not just narrowed. The build keeps its id, name, notes, screenshots and mesh --
-    only the schematic, its dimensions and its content hash change.
+    A box drawn too tight can be widened again rather than only narrowed -- that is what
+    `source.schem` is for. The build keeps its id, name, notes, screenshots and mesh; only
+    the schematic, its dimensions and its content hash change.
+
+    The first re-crop of a build that predates stored sources promotes its current
+    schematic to `source.schem` *before* cutting. That single copy is what makes the crop
+    reversible: without it the pre-crop state would be gone the moment the new one is
+    written.
     """
     import mcworld_convert
     import schem_source
@@ -582,13 +606,18 @@ def recrop_build(build_id: int, bbox: dict) -> dict:
         row = conn.execute("SELECT * FROM builds WHERE id = ?", (build_id,)).fetchone()
         if row is None:
             raise BuildNotFoundError(build_id)
-        if not row["source_path"]:
-            raise NoSourceError(build_id)
 
         folder = build_dir(build_id, row["slug"])
-        source = folder / "schem" / "source.schem"
-        if not source.exists():
+        source = croppable_source(build_id, row["slug"])
+        if source is None:
             raise NoSourceError(build_id)
+
+        if source.name == "original.schem":
+            promoted = folder / "schem" / "source.schem"
+            shutil.copyfile(source, promoted)
+            conn.execute("UPDATE builds SET source_path = ? WHERE id = ?",
+                         (_rel(promoted), build_id))
+            source = promoted
 
         world = schem_source.load_schem_source(source)
         grid, names = world.extract_region(bbox)

@@ -311,6 +311,44 @@ class SchematicAsSourceTests(unittest.TestCase):
             {"min_x": 1, "max_x": 3, "min_y": 0, "max_y": 2, "min_z": 2, "max_z": 4})
         self.assertEqual(grid.shape, (3, 3, 3))
 
+    def test_padding_never_invents_blocks(self):
+        """A Sponge palette does not have to put air in slot 0.
+
+        Chunks are 16 a side, so a schematic that isn't a multiple of 16 leaves padding in
+        its last chunk. That padding is index 0 -- and one real build in the library has
+        `minecraft:stone` there, which turned the padding into eleven columns of phantom
+        stone and inflated the suggested crop past the schematic's own edges.
+        """
+        import nbtlib
+        import numpy as np
+        from nbtlib import ByteArray, Compound, Int, Short
+
+        # 5x4x5, solid stone, with stone deliberately in palette slot 0 and no air at all.
+        width, height, length = 5, 4, 5
+        path = self.tmp / "stone0.schem"
+        nbt = Compound({
+            "Version": Int(2), "DataVersion": Int(1631),
+            "Width": Short(width), "Height": Short(height), "Length": Short(length),
+            "Palette": Compound({"minecraft:stone": Int(0)}), "PaletteMax": Int(1),
+            "BlockData": ByteArray(np.zeros(width * height * length, dtype=np.int8)),
+        })
+        import schem_convert
+        schem_convert._write_sponge(nbtlib.File(nbt), path)
+
+        source = schem_source.load_schem_source(path)
+        self.assertEqual(source.world_bounds()["max_x"], width - 1)
+
+        box = source.auto_bbox()
+        self.assertLessEqual(box["max_x"], width - 1, "the box must not run past the build")
+        self.assertLessEqual(box["max_y"], height - 1)
+        self.assertLessEqual(box["max_z"], length - 1)
+
+        grid, names = source.extract_region(
+            {"min_x": 0, "max_x": 15, "min_y": 0, "max_y": 15, "min_z": 0, "max_z": 15})
+        solid = int((grid > 0).sum())
+        self.assertEqual(solid, width * height * length,
+                         "only the real blocks, not the chunk padding")
+
     def test_the_whole_thing_round_trips_unchanged(self):
         """Cropping to the full extent must not quietly alter the build."""
         import mcworld_convert as mc
@@ -398,20 +436,23 @@ class CropAndRecropTests(unittest.TestCase):
                                      "min_z": 0, "max_z": 3})
         self.assertNotEqual(res.get_json()["build"]["schem_hash"], build["schem_hash"])
 
-    def test_recrop_needs_a_source(self):
-        """Builds added before crops were kept say so rather than failing obscurely."""
+    def test_recrop_needs_a_schematic_on_disk(self):
+        """The only build that genuinely can't be cropped is one whose file has gone."""
         import schem_fixtures as sfx
         path = sfx.sponge_v2(self.tmp / "plain.schem", 3, 3, 3)
         res = self.client.post("/api/builds", data={
             "schem": (io.BytesIO(Path(path).read_bytes()), "plain.schem"), "name": "Plain"},
             content_type="multipart/form-data")
         build = res.get_json()["build"]
-        self.assertFalse(build["can_recrop"])
-        again = self.client.post("/api/builds/{}/recrop".format(build["id"]),
-                                 json={"min_x": 0, "max_x": 1, "min_y": 0, "max_y": 1,
-                                       "min_z": 0, "max_z": 1})
-        self.assertEqual(again.status_code, 409)
-        self.assertEqual(again.get_json()["error"], "no_source")
+        # It has no stored source, but its own schematic is croppable.
+        self.assertTrue(build["can_recrop"])
+
+        (db.build_dir(build["id"], build["slug"]) / "schem" / "original.schem").unlink()
+        gone = self.client.post("/api/builds/{}/recrop".format(build["id"]),
+                                json={"min_x": 0, "max_x": 1, "min_y": 0, "max_y": 1,
+                                      "min_z": 0, "max_z": 1})
+        self.assertEqual(gone.status_code, 409)
+        self.assertEqual(gone.get_json()["error"], "no_source")
 
     def test_an_oversized_recrop_is_refused(self):
         body = self.imported_schematic()
@@ -455,6 +496,78 @@ class CropAndRecropTests(unittest.TestCase):
         self.assertEqual(res.status_code, 201)
         self.assertEqual(len(res.get_json()["added"]), 2)
         self.assertEqual(len(db.list_builds()), 2)
+
+    def legacy_build(self, w=20, h=12, l=24):
+        """A build added the old way: schem/original.schem and nothing else.
+
+        This is what every build in a library from before cropping existed looks like.
+        """
+        import schem_fixtures as sfx
+        path = sfx.sponge_v2(self.tmp / "legacy.schem", w, h, l)
+        res = self.client.post("/api/builds", data={
+            "schem": (io.BytesIO(Path(path).read_bytes()), "legacy.schem"),
+            "name": "Legacy"}, content_type="multipart/form-data")
+        return res.get_json()["build"]
+
+    def test_a_build_with_no_stored_source_can_still_be_cropped(self):
+        """The point: a library full of oversized builds predates the crop feature."""
+        build = self.legacy_build()
+        self.assertTrue(build["can_recrop"])
+        self.assertFalse(build["has_stored_source"])
+
+        folder = db.build_dir(build["id"], build["slug"]) / "schem"
+        self.assertEqual(sorted(p.name for p in folder.iterdir()), ["original.schem"])
+
+        res = self.client.post("/api/builds/{}/recrop".format(build["id"]),
+                               json={"min_x": 2, "max_x": 11, "min_y": 0, "max_y": 5,
+                                     "min_z": 3, "max_z": 14})
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.get_json()["build"]["dims"], "10x6x12")
+
+    def test_the_first_crop_keeps_a_copy_so_it_can_be_undone(self):
+        """Without this the pre-crop state is gone the moment the new one is written."""
+        build = self.legacy_build(20, 12, 24)
+        self.client.post("/api/builds/{}/recrop".format(build["id"]),
+                         json={"min_x": 5, "max_x": 9, "min_y": 0, "max_y": 3,
+                               "min_z": 5, "max_z": 9})
+
+        folder = db.build_dir(build["id"], build["slug"]) / "schem"
+        self.assertEqual(sorted(p.name for p in folder.iterdir()),
+                         ["original.schem", "source.schem"])
+
+        after = self.client.get("/api/builds/{}".format(build["id"])).get_json()["build"]
+        self.assertTrue(after["has_stored_source"])
+        self.assertEqual(after["dims"], "5x4x5")
+
+        bounds = self.client.get(
+            "/api/builds/{}/source-bounds".format(build["id"])).get_json()
+        undone = self.client.post("/api/builds/{}/recrop".format(build["id"]),
+                                  json=bounds["bounds"]).get_json()["build"]
+        self.assertEqual(undone["dims"], "20x12x24", "back to how it was before cropping")
+
+    def test_source_bounds_works_without_a_stored_source(self):
+        build = self.legacy_build(20, 12, 24)
+        body = self.client.get(
+            "/api/builds/{}/source-bounds".format(build["id"])).get_json()
+        self.assertFalse(body["has_stored_source"])
+        self.assertEqual(body["bounds"],
+                         {"min_x": 0, "max_x": 19, "min_y": 0, "max_y": 11,
+                          "min_z": 0, "max_z": 23})
+        self.assertIn("suggested", body, "the picker needs a sensible starting box")
+
+    def test_the_source_preview_renders_without_a_stored_source(self):
+        build = self.legacy_build()
+        res = self.client.get("/api/builds/{}/source-preview.png".format(build["id"]))
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.get_data().startswith(b"\x89PNG\r\n\x1a\n"))
+        res.close()
+
+    def test_a_crop_of_the_whole_thing_changes_nothing_about_it(self):
+        build = self.legacy_build(20, 12, 24)
+        res = self.client.post("/api/builds/{}/recrop".format(build["id"]),
+                               json={"min_x": 0, "max_x": 19, "min_y": 0, "max_y": 11,
+                                     "min_z": 0, "max_z": 23})
+        self.assertEqual(res.get_json()["build"]["dims"], "20x12x24")
 
     def test_the_crop_travels_in_the_sidecar(self):
         body = self.imported_schematic()
