@@ -7,6 +7,7 @@ something you asked for explicitly.
 """
 from __future__ import annotations
 
+import io
 import os
 import re
 import shutil
@@ -73,6 +74,64 @@ class ApiVersionTests(unittest.TestCase):
             self.frontend_expectation(), server.API_VERSION,
             "static/app.js EXPECTED_API_VERSION and server.API_VERSION must match; "
             "bump both together or the stale-server banner stops working")
+
+
+class PortHolderTests(unittest.TestCase):
+    """Starting a second copy over a running one is this app's most misleading failure.
+
+    Python reads modules once, so an old process serves old code forever. The API version
+    banner can't catch it -- a fix behind an unchanged endpoint doesn't change the version
+    -- so the page looks perfect while rejecting a file the fixed code accepts. Detecting
+    the busy port up front is the only thing that makes it visible.
+    """
+
+    def test_a_free_port_reports_nobody(self):
+        import socket as sk
+        probe = sk.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        self.assertIsNone(server.port_holder("127.0.0.1", port))
+
+    def test_a_busy_port_is_detected(self):
+        import socket as sk
+        held = sk.socket()
+        held.bind(("127.0.0.1", 0))
+        held.listen(1)
+        self.addCleanup(held.close)
+        port = held.getsockname()[1]
+        self.assertIsNotNone(server.port_holder("127.0.0.1", port))
+
+    def test_a_stranger_on_the_port_is_not_called_our_own_server(self):
+        """The advice differs -- stop the old copy, versus pick another port."""
+        import socket as sk
+        held = sk.socket()
+        held.bind(("127.0.0.1", 0))
+        held.listen(1)
+        self.addCleanup(held.close)
+        holder = server.port_holder("127.0.0.1", held.getsockname()[1])
+        self.assertEqual(holder, "another program")
+
+    def test_our_own_server_is_recognised_by_its_meta_endpoint(self):
+        import socket as sk
+        held = sk.socket()
+        held.bind(("127.0.0.1", 0))
+        held.listen(1)
+        self.addCleanup(held.close)
+        port = held.getsockname()[1]
+
+        class FakeResponse:
+            def read(self_inner, *a):
+                return b'{"api_version": 6}'
+            def __enter__(self_inner):
+                return io.BytesIO(b'{"api_version": 6}')
+            def __exit__(self_inner, *a):
+                return False
+
+        with mock.patch("urllib.request.urlopen", return_value=FakeResponse()):
+            holder = server.port_holder("127.0.0.1", port)
+        self.assertIn("older copy", holder)
+        self.assertIn("6", holder)
 
 
 class HostResolutionTests(unittest.TestCase):

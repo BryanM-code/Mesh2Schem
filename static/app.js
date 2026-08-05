@@ -388,7 +388,7 @@ function viewAdd() {
   mount(root);
   const work = root.querySelector("#add-work");
   wireDrop(root.querySelector('[data-drop="schem"]'), {
-    accept: ".schem,.schematic,.mcworld", multiple: true,
+    accept: ".schem,.schematic,.mcworld,.zip", multiple: true,
     onFiles: (files) => handleAddFiles(files, work),
   });
 }

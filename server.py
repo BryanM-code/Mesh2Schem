@@ -556,9 +556,14 @@ def api_import_save(token: str):
                 "min_y": bbox["min_y"] - keep["min_y"], "max_y": bbox["max_y"] - keep["min_y"],
                 "min_z": bbox["min_z"] - keep["min_z"], "max_z": bbox["max_z"] - keep["min_z"]}
 
+        # Anything the conversion could not carry across goes in the build's notes, the way
+        # the legacy .schematic path has always recorded it. A legacy file converted on the
+        # way into the picker contributes its own warnings too -- unmapped blocks, dropped
+        # entities -- which would otherwise be lost between the two conversions.
+        warnings = list(getattr(source, "warnings", ())) + list(info["warnings"])
         note = source_note
-        if info["warnings"]:
-            joined = " ".join(info["warnings"])
+        if warnings:
+            joined = " ".join(warnings)
             note = (note + "  " + joined).strip() if note else joined
 
         try:
@@ -569,7 +574,7 @@ def api_import_save(token: str):
         except db.DuplicateBuildError as exc:
             return jsonify(error="duplicate", existing=exc.existing), 409
         _warm_thumb(row, "schem")
-        return jsonify(build=row, warnings=info["warnings"],
+        return jsonify(build=row, warnings=warnings,
                        palette_size=info["palette_size"]), 201
     except import_source.WorldError as exc:
         return jsonify(**exc.details()), 400
@@ -1184,6 +1189,45 @@ def _is_loopback(address: str) -> bool:
     return str(address) in ("127.0.0.1", "localhost", "::1")
 
 
+def port_holder(host: str, port: int) -> Optional[str]:
+    """Describe whatever already holds `host:port`, or None if it's free.
+
+    Starting a second copy while an old one is still running is the single most
+    misleading failure this app has: Python reads its modules once, so a server left
+    running since before an edit keeps serving the OLD code forever. The page looks
+    completely normal -- the API version banner doesn't fire either, because a bug fix
+    behind an unchanged endpoint doesn't change the version -- and a file that the fixed
+    code accepts is still rejected, with no hint that the code on disk isn't the code
+    answering. That has now been mistaken for a real bug three separate times.
+
+    Werkzeug does refuse to bind, but too late to help: the browser timer has already
+    fired and opened a tab onto the *old* server, so the visible result of a failed start
+    is a working-looking app. Checking first is what makes the failure legible.
+    """
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        # Deliberately no SO_REUSEADDR: this should fail in exactly the cases app.run()
+        # would, not in fewer of them.
+        probe.bind((host if host != "localhost" else "127.0.0.1", port))
+        return None
+    except OSError:
+        pass
+    finally:
+        probe.close()
+
+    # Taken -- but by us, or by something unrelated? Asking is worth it, because the
+    # advice differs: stop the old copy, versus pick another port.
+    try:
+        import json as _json
+        import urllib.request
+        with urllib.request.urlopen(
+                "http://{}:{}/api/meta".format(host, port), timeout=2) as response:
+            meta = _json.load(response)
+        return "an older copy of this app (API v{})".format(meta.get("api_version", "?"))
+    except Exception:
+        return "another program"
+
+
 def find_tailscale_ip() -> Optional[str]:
     """This machine's Tailscale IPv4 address, or None if Tailscale isn't up.
 
@@ -1263,6 +1307,27 @@ def _startup_banner(host: str, note: str, port: int) -> None:
 if __name__ == "__main__":
     port = int(os.environ.get("BDC_PORT", "5000"))
     bind_host, reach = resolve_host(os.environ.get("BDC_HOST", "127.0.0.1"))
+
+    # Stop before anything else if the address is taken -- in particular before the
+    # browser timer below, which would otherwise open a tab onto the old server.
+    holder = port_holder(bind_host, port)
+    if holder:
+        print("")
+        print("  Port {} is already in use by {}.".format(port, holder))
+        print("")
+        print("  Nothing was started. An already-running copy keeps serving the code it")
+        print("  started with, so your edits would not appear no matter how many times you")
+        print("  reloaded the page.")
+        print("")
+        if "older copy" in holder:
+            print("  Stop it first, then run this again:")
+            print("    Windows   taskkill /F /IM python.exe")
+            print("    macOS     pkill -f server.py")
+            print("  One launch can leave two processes behind, so check none remain.")
+        else:
+            print("  Use a different port:  BDC_PORT=5001 python server.py")
+        print("")
+        raise SystemExit(1)
 
     # Only pop a browser open when this is the machine you're sitting at; a headless
     # always-on server should not be launching windows every restart.

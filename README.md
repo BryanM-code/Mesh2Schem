@@ -676,6 +676,26 @@ Get-CimInstance Win32_Process -Filter "Name like '%python%'" |
 Bump `API_VERSION` in `server.py` whenever the JSON contract changes in a way the frontend
 depends on, and `EXPECTED_API_VERSION` in `static/app.js` to match.
 
+### The version banner can't catch everything
+
+`api_version` only changes when the JSON *shape* does. A bug fixed behind an unchanged
+endpoint — a reader that now accepts a file it used to reject — leaves the version
+identical, so a stale server passes the check while still being wrong. The symptom is a
+file that works in a test but is refused by the running app, which reads as a real bug and
+isn't.
+
+That is why startup now refuses to run when the port is already taken:
+
+```
+  Port 5000 is already in use by an older copy of this app (API v6).
+  Nothing was started.
+```
+
+Previously the second launch printed its success banner and opened a browser tab *before*
+Werkzeug failed to bind — so a failed start looked exactly like a successful one, pointed
+at the old server. Note also that **one launch can leave two processes**, so killing the
+one you can see isn't always enough; the PowerShell snippet above catches both.
+
 ## Schema migrations
 
 The database records a `schema_version` and migrates forward on startup. There is one

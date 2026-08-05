@@ -349,6 +349,37 @@ class SchematicAsSourceTests(unittest.TestCase):
         self.assertEqual(solid, width * height * length,
                          "only the real blocks, not the chunk padding")
 
+    def test_a_legacy_mcedit_schematic_opens_in_the_picker(self):
+        """The picker must read both formats, not just the modern one.
+
+        `schem_voxels` understands Sponge only, so a pre-1.13 `.schematic` -- which plenty
+        of downloads still are -- came back as "Could not read that schematic." The add
+        path had always converted first; the picker skipped it, so a perfectly good file
+        was rejected with nothing the person dropping it could act on.
+        """
+        import schem_fixtures as sfx
+        legacy = Path(sfx.legacy_house(self.tmp / "old.schematic"))
+
+        source = schem_source.load_schem_source(legacy)
+
+        self.assertEqual(source.world_bounds(),
+                         {"min_x": 0, "max_x": 4, "min_y": 0, "max_y": 3,
+                          "min_z": 0, "max_z": 4})
+        self.assertTrue(source.warnings, "conversion losses must survive for the note")
+        grid, _names = source.extract_region(source.world_bounds())
+        self.assertEqual(grid.shape, (4, 5, 5))
+
+    def test_converting_a_legacy_file_never_writes_beside_it(self):
+        """The dropped file usually sits in someone's Downloads; only read from there."""
+        import schem_fixtures as sfx
+        folder = self.tmp / "downloads"
+        folder.mkdir()
+        legacy = Path(sfx.legacy_house(folder / "old.schematic"))
+
+        schem_source.load_schem_source(legacy)
+
+        self.assertEqual([p.name for p in folder.iterdir()], ["old.schematic"])
+
     def test_the_whole_thing_round_trips_unchanged(self):
         """Cropping to the full extent must not quietly alter the build."""
         import mcworld_convert as mc
@@ -393,6 +424,25 @@ class CropAndRecropTests(unittest.TestCase):
         self.assertEqual(body["kind_label"], "schematic")
         self.assertIn("map_bounds", body)
         self.assertIn("preview", body)
+
+    def test_a_dropped_legacy_schematic_opens_the_picker_too(self):
+        """End to end for the format that was being rejected on drop."""
+        import schem_fixtures as sfx
+        path = sfx.legacy_house(self.tmp / "old.schematic")
+
+        res = self.drop(path, "old.schematic")
+
+        self.assertEqual(res.status_code, 200, res.get_json())
+        body = res.get_json()
+        self.assertEqual(body["kind"], "schematic")
+        self.assertEqual(self.client.get(body["preview"]).status_code, 200)
+
+        saved = self.client.post("/api/import/{}/save".format(body["token"]),
+                                 json=dict(body["auto_bbox"], name="Old House"))
+        self.assertEqual(saved.status_code, 201)
+        build = saved.get_json()["build"]
+        self.assertIn("no 1.13 equivalent", build["source_note"] or "",
+                      "the legacy conversion's own losses belong in the note")
 
     def test_saving_a_crop_keeps_the_uncropped_source(self):
         body = self.imported_schematic()

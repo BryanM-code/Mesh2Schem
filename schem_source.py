@@ -10,6 +10,8 @@ handful of array writes.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from bedrock_world import WorldError
 from voxel_world import AIR_BLOCKS, VoxelWorld
 
@@ -19,9 +21,12 @@ __all__ = ["SchematicSource", "load_schem_source"]
 class SchematicSource(VoxelWorld):
     """A schematic, chunked up so the region picker can work on it."""
 
-    def __init__(self, subchunks: dict, level_name: str = "", dims=(0, 0, 0)):
+    def __init__(self, subchunks: dict, level_name: str = "", dims=(0, 0, 0),
+                 warnings=None):
         super().__init__(subchunks, level_name, source_label="schematic")
         self.dims = dims
+        # Anything the conversion could not carry across, for the build's notes.
+        self.warnings = list(warnings or ())
 
     def auto_bbox(self, skip=None):
         """The built area, clamped to the schematic's real dimensions.
@@ -59,11 +64,41 @@ class SchematicSource(VoxelWorld):
 
 
 def load_schem_source(path) -> SchematicSource:
-    """Read a `.schem` into the shared chunked form."""
+    """Read a schematic into the shared chunked form, converting legacy files first.
+
+    Both formats are dropped here: modern Sponge `.schem`, and the pre-1.13 MCEdit
+    `.schematic` that older downloads still ship. Only Sponge has a palette, so a legacy
+    file is converted the same way the library's add path converts it -- otherwise a
+    perfectly good `.schematic` is rejected as unreadable, which is not a thing the person
+    dropping it can act on.
+    """
+    import os
+    import tempfile
     import numpy as np
+    import schem_convert
     import schem_voxels
 
-    voxels = schem_voxels.load_voxels(path)
+    path = Path(path)
+    warnings: list = []
+    # Converted into a temp file rather than beside the input: the input is often the
+    # user's own download, and nothing here writes into a folder it was only asked to read.
+    handle, scratch = tempfile.mkstemp(suffix=".schem")
+    os.close(handle)
+    scratch = Path(scratch)
+    try:
+        try:
+            prepared = schem_convert.ensure_sponge(path, scratch)
+        except schem_convert.SchematicError as exc:
+            raise WorldError(exc.message, code=exc.code, stage="schematic") from exc
+        if prepared.converted:
+            warnings = list(prepared.warnings)
+        voxels = schem_voxels.load_voxels(prepared.path)
+    finally:
+        try:
+            scratch.unlink(missing_ok=True)
+        except OSError:
+            pass
+
     if voxels is None:
         raise WorldError("Could not read that schematic.", code="unreadable_schem",
                          stage="schematic")
@@ -105,4 +140,5 @@ def load_schem_source(path) -> SchematicSource:
 
     if not subchunks:
         raise WorldError("That schematic is empty.", code="empty_schem", stage="schematic")
-    return SchematicSource(subchunks, dims=(width, height, length))
+    return SchematicSource(subchunks, dims=(width, height, length),
+                           warnings=warnings)
