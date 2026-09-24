@@ -153,7 +153,7 @@ const recropBuild = (id, bbox) => api("/api/builds/" + id + "/recrop", asJson(bb
 // when the server starts. Leave a server running while the code changes and you get a new
 // frontend talking to an old API — controls whose data never arrives would just quietly
 // not appear. Rather than let that happen silently, check once and say so.
-const EXPECTED_API_VERSION = 6;
+const EXPECTED_API_VERSION = 8;
 
 function checkServerFreshness() {
   api("/api/meta")
@@ -219,6 +219,15 @@ const isMcworld = (file) => MCWORLD_EXT.test(file.name);
 
 // ── Small shared bits ─────────────────────────────────────────────────────────
 function chip(k, v) { return h("span", { class: "chip" }, h("span", { class: "k" }, k), h("b", {}, v)); }
+
+// Every build's number, the way it's written everywhere: on the card, in the table, in the
+// folder name on disk and in the CSV. It's the build's id, so it is unique, never reused,
+// and doesn't move when the library is sorted or a build is renamed — which is what makes
+// it worth quoting when you mean one specific schematic.
+function buildNumber(b, cls) {
+  return h("span", { class: "build-no" + (cls ? " " + cls : ""), title: "Build number" },
+    "#" + b.id);
+}
 function dimsChips(info) {
   return h("div", { class: "chips" },
     h("span", { class: "chip" }, h("span", { class: "dims-big" }, info.dims)),
@@ -1063,12 +1072,13 @@ function libCard(b, reload) {
   const card = h("div", { class: "lib-card" },
     art,
     h("div", { class: "card-meta" },
-      h("div", { class: "card-name", title: b.name }, b.name,
+      h("div", { class: "card-name", title: b.name }, buildNumber(b), b.name,
         b.variant_no > 0 ? h("span", { class: "cell-variant" }, "v" + b.variant_no) : null),
       h("div", { class: "card-sub" },
         h("span", { class: "cell-dims" }, b.dims), statusBadge(b.status), pipelinePips(b))));
 
   const actions = h("div", { class: "card-actions" });
+  actions.append(inspectButton(b, "btn btn-sm"));
   if (b.has_glb) {
     actions.append(unpairButton(b, {
       label: "Unpair", className: "btn btn-danger btn-sm", host: card, onDone: reload }));
@@ -1081,6 +1091,7 @@ function libCard(b, reload) {
 
 function libRow(b) {
   const tr = h("tr", {},
+    h("td", { class: "num" }, buildNumber(b)),
     h("td", {}, h("span", { class: "cell-name" }, b.name),
       b.variant_no > 0 ? h("span", { class: "cell-variant" }, "v" + b.variant_no) : null),
     h("td", { class: "num" }, h("span", { class: "cell-dims" }, b.dims),
@@ -1123,6 +1134,7 @@ async function viewDetail(id) {
 function renderDetail(body, b) {
   const grid = h("div", { class: "detail-grid" });
   const add = (k, v, cls) => grid.append(h("div", {}, h("div", { class: "k" }, k), h("div", { class: "v" + (cls ? " " + cls : "") }, v)));
+  add("Build number", "#" + b.id);
   add("Dimensions (W×H×L)", b.dims + "  ·  longest " + b.longest);
   add("Status", b.status_label);
   add("Added", fmtDate(b.added_at));
@@ -1136,8 +1148,10 @@ function renderDetail(body, b) {
   add("TRELLIS mesh", b.glb_path || "— (not paired yet)", "path");
 
   body.replaceChildren(
-    h("div", { class: "detail-head" }, h("h1", {}, b.name), statusBadge(b.status),
-      b.variant_no > 0 ? h("span", { class: "cell-variant" }, "variant " + b.variant_no) : null),
+    h("div", { class: "detail-head" }, buildNumber(b, "build-no-lg"), h("h1", {}, b.name),
+      statusBadge(b.status),
+      b.variant_no > 0 ? h("span", { class: "cell-variant" }, "variant " + b.variant_no) : null,
+      h("span", { class: "detail-head-actions" }, inspectButton(b, "btn btn-sm"))),
     detailThumbs(b),
     originPanel(b),
     grid,
@@ -1164,20 +1178,303 @@ function detailThumbs(b) {
     const caption = stage.optional && present
       ? stage.caption + " (" + b.shot_count + "/" + b.max_shots + ")"
       : stage.caption;
-    // Tiles whose stored file is itself a viewable image open it full size; the schematic
-    // and the mesh are downloads, so those stay as plain tiles with links in their sections.
+    // Tiles whose stored file is itself a viewable image open it full size; the mesh is a
+    // download, so it stays a plain tile with a link in its section. The schematic has no
+    // picture to open — it *is* the render — so its tile opens the viewer instead.
     const viewable = present && (stage.optional || stage.key === "image");
-    const body = viewable
-      ? h("a", {
-          href: "/api/builds/" + b.id + "/file/" +
-            (stage.optional ? "shot-" + b.shots[0].slot : stage.key),
-          target: "_blank", rel: "noreferrer noopener", title: "Open at full size",
-        }, tile)
-      : tile;
+    let body = tile;
+    if (viewable) {
+      body = h("a", {
+        href: "/api/builds/" + b.id + "/file/" +
+          (stage.optional ? "shot-" + b.shots[0].slot : stage.key),
+        target: "_blank", rel: "noreferrer noopener", title: "Open at full size",
+      }, tile);
+    } else if (stage.key === "schem") {
+      tile.classList.add("thumb-inspectable");
+      tile.title = "Inspect this schematic";
+      tile.addEventListener("click", () => openInspector(b));
+    }
     return h("figure", {}, body,
       h("figcaption", { class: present ? "" : "muted" }, caption));
   };
   return h("div", { class: "thumb-strip" }, STAGES.map(figure));
+}
+
+// ── Inspecting a schematic ────────────────────────────────────────────────────
+// A thumbnail answers "which build is this". Inspect answers "what is it made of": the build
+// at several times the size, on a camera you drag to any angle, with a height slider that
+// lifts the roof off so the inside can be seen.
+//
+// Every frame is a PNG rendered by the server — no 3D library and no voxel data in the
+// browser — so what you inspect is drawn from the stored .schem itself by the same code that
+// draws the Library. Dragging therefore costs a round trip per frame, and the whole design
+// of this viewer follows from that: while the camera is moving it asks for small, coarse
+// frames and never lets more than one be in flight; when it stops, it asks for the full one.
+// The browser is left to do only what it can do instantly — zoom and pan are a CSS transform.
+
+const ZOOM_MIN = 1, ZOOM_MAX = 8, ZOOM_STEP = 1.35;
+// Degrees per pixel dragged, and the grid angles snap to. Snapping is what makes dragging
+// back over ground you have covered free: those frames are already in the browser's cache.
+const ORBIT_SENSITIVITY = 0.55, ORBIT_STEP = 5;
+const PITCH_MIN = -25, PITCH_MAX = 89;
+const DEFAULT_YAW = 45, DEFAULT_PITCH = 35;
+
+function inspectButton(b, className) {
+  const btn = h("button", { class: className || "btn btn-sm",
+    title: "Look at this schematic up close" }, "Inspect");
+  btn.addEventListener("click", (e) => { e.stopPropagation(); openInspector(b); });
+  return btn;
+}
+
+function openInspector(b) {
+  // Layers are 0-based in the API and 1-based on the slider, because "showing 1 of 27" is
+  // how a person counts floors. The slider starts at the top: the whole build, uncut.
+  const top = Math.max(1, b.h) - 1;
+  const state = { yaw: DEFAULT_YAW, pitch: DEFAULT_PITCH, layer: top,
+    zoom: 1, panX: 0, panY: 0 };
+
+  const img = h("img", { class: "inspect-img", alt: "Render of " + b.name,
+    draggable: false });
+  const stage = h("div", { class: "inspect-stage" }, img,
+    h("div", { class: "inspect-spin" }, h("span", { class: "spin" })));
+  const failed = h("div", { class: "notice notice-error", hidden: true },
+    "That schematic could not be rendered.");
+
+  const angleOut = h("span", { class: "inspect-read mono" }, "");
+  const layerOut = h("span", { class: "inspect-read mono" }, "whole build");
+  const zoomOut = h("span", { class: "inspect-read mono" }, "100%");
+  const slider = h("input", { class: "inspect-slider", type: "range",
+    min: "1", max: String(top + 1), value: String(top + 1), step: "1",
+    title: "Hide everything above this layer" });
+
+  const panel = h("div", { class: "inspect-panel", role: "dialog", "aria-modal": "true",
+    "aria-label": "Inspect " + b.name });
+  const overlay = h("div", { class: "inspect-overlay" }, panel);
+
+  // ── Drawing ────────────────────────────────────────────────────────────────
+  // Frames are loaded off-screen and swapped in only once decoded, so what is on screen is
+  // always a finished picture — turning steps between angles instead of blinking through
+  // empty <img> boxes. Only one request is ever in flight: a camera that moves while one is
+  // out just overwrites where it wants to be, and that angle is asked for when the reply
+  // lands. Dropping the angles in between is the point — they are stale by then anyway.
+  let inFlight = null, queued = false, closed = false;
+  let orbiting = null, panning = null;
+
+  function frameUrl(preview) {
+    return "/api/builds/" + b.id + "/view.png?yaw=" + state.yaw + "&pitch=" + state.pitch +
+      (state.layer < top ? "&layer=" + state.layer : "") + (preview ? "&preview=1" : "");
+  }
+
+  function draw(preview) {
+    const url = frameUrl(preview);
+    if (img.dataset.url === url) { queued = false; return; }
+    if (inFlight) { queued = true; return; }
+    const next = new Image();
+    inFlight = next;
+    // No spinner over a preview: they arrive in a fraction of a second, and flashing a scrim
+    // on every one of them would make a smooth turn look like a stutter. The full frame that
+    // lands when the camera stops is the slow one, and that one says so.
+    if (!preview) stage.classList.add("busy");
+    const settle = (ok) => {
+      if (closed) return;
+      inFlight = null;
+      stage.classList.remove("busy");
+      if (ok) { img.src = url; img.dataset.url = url; }
+      failed.hidden = ok;
+      // Whatever was asked for while this was out is where the camera actually is now.
+      if (queued) { queued = false; draw(orbiting !== null); }
+    };
+    next.addEventListener("load", () => settle(true));
+    next.addEventListener("error", () => settle(false));
+    next.src = url;
+  }
+
+  let sliderTimer;
+  const drawSoon = () => { clearTimeout(sliderTimer); sliderTimer = setTimeout(() => draw(), 130); };
+
+  // ── The camera ─────────────────────────────────────────────────────────────
+  // Angles snap to a grid of whole degrees, so turning back the way you came replays frames
+  // the browser already has instead of asking for a hair's-breadth-different render of the
+  // same view. Pitch is clamped rather than wrapped: past the poles the build is upside down.
+  const snap = (deg) => Math.round(deg / ORBIT_STEP) * ORBIT_STEP;
+
+  function orbitTo(yaw, pitch, preview) {
+    const nextYaw = (((snap(yaw) % 360) + 360) % 360);
+    const nextPitch = Math.max(PITCH_MIN, Math.min(PITCH_MAX, snap(pitch)));
+    const moved = nextYaw !== state.yaw || nextPitch !== state.pitch;
+    state.yaw = nextYaw;
+    state.pitch = nextPitch;
+    angleOut.textContent = state.yaw + "° / " + state.pitch + "°";
+    if (moved) draw(preview);
+  }
+
+  function cutTo(layer, now) {
+    state.layer = Math.max(0, Math.min(top, layer));
+    slider.value = String(state.layer + 1);
+    layerOut.textContent = state.layer >= top
+      ? "whole build" : (state.layer + 1) + " of " + (top + 1);
+    if (now) draw(); else drawSoon();
+  }
+
+  // Zoom keeps whatever is under the pointer under the pointer, which is the difference
+  // between examining a corner of a build and hunting for it after every step.
+  function zoomTo(next, anchorX, anchorY) {
+    const from = state.zoom;
+    const to = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, next));
+    if (to === from) return;
+    const rect = stage.getBoundingClientRect();
+    const ax = (anchorX === undefined ? rect.width / 2 : anchorX) - rect.width / 2;
+    const ay = (anchorY === undefined ? rect.height / 2 : anchorY) - rect.height / 2;
+    state.panX += (ax - state.panX) * (1 - to / from);
+    state.panY += (ay - state.panY) * (1 - to / from);
+    state.zoom = to;
+    applyTransform();
+  }
+
+  function applyTransform() {
+    // Pan is bounded by how much of the image is actually off-frame, so the build can't be
+    // dragged off into empty space and lost.
+    const rect = stage.getBoundingClientRect();
+    const slackX = Math.max(0, (rect.width * state.zoom - rect.width) / 2);
+    const slackY = Math.max(0, (rect.height * state.zoom - rect.height) / 2);
+    state.panX = Math.max(-slackX, Math.min(slackX, state.panX));
+    state.panY = Math.max(-slackY, Math.min(slackY, state.panY));
+    img.style.transform = "translate(" + state.panX + "px," + state.panY + "px) scale(" + state.zoom + ")";
+    zoomOut.textContent = Math.round(state.zoom * 100) + "%";
+    stage.classList.toggle("zoomed", state.zoom > 1);
+  }
+
+  function resetZoom() { state.zoom = 1; state.panX = state.panY = 0; applyTransform(); }
+
+  stage.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const rect = stage.getBoundingClientRect();
+    zoomTo(state.zoom * (e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP),
+      e.clientX - rect.left, e.clientY - rect.top);
+  }, { passive: false });
+
+  // ── Dragging ───────────────────────────────────────────────────────────────
+  // Plain drag turns the camera; hold Shift (or use the middle button) to slide a zoomed-in
+  // build around instead. Orbit is the default because it is the thing you came here to do,
+  // and panning is only meaningful once you have zoomed past the frame.
+  stage.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0 && e.button !== 1) return;
+    // Panning only means something once the build is bigger than the frame; asking for it
+    // when there is nothing to slide turns the camera instead of doing nothing at all.
+    const wantsPan = (e.button === 1 || e.shiftKey) && state.zoom > 1;
+    if (wantsPan) panning = { x: e.clientX, y: e.clientY };
+    else orbiting = { x: e.clientX, y: e.clientY, yaw: state.yaw, pitch: state.pitch };
+    stage.classList.add("dragging");
+    stage.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+
+  stage.addEventListener("pointermove", (e) => {
+    if (panning) {
+      state.panX += e.clientX - panning.x;
+      state.panY += e.clientY - panning.y;
+      panning = { x: e.clientX, y: e.clientY };
+      applyTransform();
+      return;
+    }
+    if (!orbiting) return;
+    // Measured from where the drag began rather than accumulated per event, so the snapping
+    // can't drift: the same pointer position always means the same angle.
+    orbitTo(orbiting.yaw - (e.clientX - orbiting.x) * ORBIT_SENSITIVITY,
+            orbiting.pitch + (e.clientY - orbiting.y) * ORBIT_SENSITIVITY, true);
+  });
+
+  const endDrag = (e) => {
+    if (!orbiting && !panning) return;
+    const wasOrbiting = orbiting !== null;
+    orbiting = panning = null;
+    stage.classList.remove("dragging");
+    try { stage.releasePointerCapture(e.pointerId); } catch (_) { /* already gone */ }
+    if (wasOrbiting) draw();       // the camera has stopped: ask for the full-detail frame
+  };
+  stage.addEventListener("pointerup", endDrag);
+  stage.addEventListener("pointercancel", endDrag);
+
+  slider.addEventListener("input", () => cutTo(parseInt(slider.value, 10) - 1));
+
+  const iconBtn = (label, title, onClick) => {
+    const btn = h("button", { class: "btn btn-ghost btn-sm", title: title }, label);
+    btn.addEventListener("click", onClick);
+    return btn;
+  };
+
+  // ── Keys ───────────────────────────────────────────────────────────────────
+  // The arrows drive the camera, since that is the control this viewer is built around; the
+  // cutaway gets the bracket keys next to them, and can also be tabbed to and driven with
+  // the arrows as any range input can.
+  const KEY_TURN = 15, KEY_TILT = 10;
+  const onKey = (e) => {
+    if (e.key === "Escape") { close(); return; }
+    // A focused control keeps its own keys — the slider's arrows step it, and its input
+    // event redraws — so only unfocused keys drive the viewer.
+    if (/^(INPUT|TEXTAREA|SELECT)$/.test((e.target && e.target.tagName) || "")) return;
+    if (e.key === "ArrowLeft") { orbitTo(state.yaw - KEY_TURN, state.pitch); e.preventDefault(); }
+    else if (e.key === "ArrowRight") { orbitTo(state.yaw + KEY_TURN, state.pitch); e.preventDefault(); }
+    else if (e.key === "ArrowUp") { orbitTo(state.yaw, state.pitch + KEY_TILT); e.preventDefault(); }
+    else if (e.key === "ArrowDown") { orbitTo(state.yaw, state.pitch - KEY_TILT); e.preventDefault(); }
+    else if (e.key === "]") cutTo(state.layer + 1);
+    else if (e.key === "[") cutTo(state.layer - 1);
+    else if (e.key === "+" || e.key === "=") zoomTo(state.zoom * ZOOM_STEP);
+    else if (e.key === "-") zoomTo(state.zoom / ZOOM_STEP);
+    else if (e.key === "0") resetZoom();
+  };
+
+  function close() {
+    if (closed) return;
+    closed = true;
+    inFlight = null;
+    queued = false;
+    clearTimeout(sliderTimer);
+    document.removeEventListener("keydown", onKey);
+    document.body.classList.remove("modal-open");
+    overlay.remove();
+  }
+
+  overlay.addEventListener("pointerdown", (e) => { if (e.target === overlay) close(); });
+  document.addEventListener("keydown", onKey);
+
+  const closeBtn = h("button", { class: "btn btn-ghost btn-sm inspect-close",
+    title: "Close (Esc)", "aria-label": "Close" }, "✕");
+  closeBtn.addEventListener("click", close);
+
+  panel.replaceChildren(
+    h("div", { class: "inspect-head" },
+      buildNumber(b), h("strong", { class: "inspect-title" }, b.name),
+      h("span", { class: "cell-dims muted" }, b.dims),
+      closeBtn),
+    stage,
+    failed,
+    h("div", { class: "inspect-controls" },
+      h("div", { class: "inspect-group" },
+        h("span", { class: "k", title: "Yaw / pitch" }, "Angle"), angleOut,
+        iconBtn("Reset", "Back to the opening angle", () => {
+          orbitTo(DEFAULT_YAW, DEFAULT_PITCH);
+        })),
+      h("div", { class: "inspect-group inspect-cut" },
+        h("span", { class: "k" }, "Cut away"), slider, layerOut,
+        iconBtn("Whole build", "Show every layer again (])", () => cutTo(top))),
+      h("div", { class: "inspect-group" },
+        h("span", { class: "k" }, "Zoom"),
+        iconBtn("−", "Zoom out (−)", () => zoomTo(state.zoom / ZOOM_STEP)),
+        iconBtn("+", "Zoom in (+)", () => zoomTo(state.zoom * ZOOM_STEP)),
+        zoomOut,
+        iconBtn("Fit", "Back to fitting the frame (0)", resetZoom))),
+    h("div", { class: "inspect-foot" },
+      h("span", { class: "muted" },
+        "Drag to turn · scroll to zoom · shift-drag to move · arrows turn · [ ] cut · Esc closes"),
+      h("a", { href: "/api/builds/" + b.id + "/schem" }, "Download .schem")));
+
+  document.body.classList.add("modal-open");
+  document.body.append(overlay);
+  applyTransform();
+  cutTo(top, true);
+  angleOut.textContent = state.yaw + "° / " + state.pitch + "°";
+  closeBtn.focus();
 }
 
 // ── Detail: where this build came from ────────────────────────────────────────

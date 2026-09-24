@@ -60,7 +60,7 @@
       <div id="scan-panel" class="scan-panel" hidden></div>
 
       <div class="filters">
-        <input type="search" id="f-q" class="input" placeholder="Search name, notes or source&hellip;">
+        <input type="search" id="f-q" class="input" placeholder="Search name, notes, source or #number&hellip;">
         <select id="f-status" class="input">
           <option value="">All statuses</option>
           <option value="needs_image">Needs AI image</option>
@@ -83,6 +83,7 @@
         <table class="grid">
           <thead>
             <tr>
+              <th data-sort="id" class="sortable num" title="Build number">#</th>
               <th data-sort="name" class="sortable">Name</th>
               <th data-sort="longest" class="sortable num">Dims (W&times;H&times;L)</th>
               <th data-sort="status" class="sortable">Status</th>

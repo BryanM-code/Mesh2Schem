@@ -27,6 +27,7 @@ db.BUILDS_DIR = SANDBOX / "builds"
 import schem_convert  # noqa: E402
 import schem_fixtures as fx  # noqa: E402
 import server  # noqa: E402
+import thumbs  # noqa: E402
 
 server.TMP_DIR = SANDBOX / ".tmp"
 server.TMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -201,8 +202,8 @@ class PairedLibraryTests(unittest.TestCase):
         server.TMP_DIR.mkdir(parents=True, exist_ok=True)
         db.init_db()
 
-    def add_build(self, name="House"):
-        path = Path(fx.sponge_v2(self.tmp / (name + ".schem"), 6, 5, 6))
+    def add_build(self, name="House", dims=(6, 5, 6)):
+        path = Path(fx.sponge_v2(self.tmp / (name + ".schem"), *dims))
         res = self.client.post(
             "/api/builds",
             data={"schem": (io.BytesIO(path.read_bytes()), path.name), "name": name},
@@ -781,6 +782,274 @@ class MetadataTests(PairedLibraryTests):
                           json={"source_url": "https://planetminecraft.com/x"})
         found = self.client.get("/api/builds?q=planetminecraft").get_json()["builds"]
         self.assertEqual([b["id"] for b in found], [build["id"]])
+
+
+class BuildNumberTests(PairedLibraryTests):
+    """The number shown beside every build's name, which is its id.
+
+    It is what the folder on disk is named after and what the CSV reports, so it has to be
+    reachable from the search box and usable as a sort -- otherwise "build #7" is a label
+    you can read but not act on.
+    """
+
+    def test_a_number_finds_exactly_that_build(self):
+        first, second = self.add_build("One"), self.add_build("Two")
+        found = self.client.get(
+            "/api/builds?q={}".format(second["id"])).get_json()["builds"]
+        self.assertEqual([b["id"] for b in found], [second["id"]])
+        self.assertNotIn(first["id"], [b["id"] for b in found])
+
+    def test_the_hash_it_is_displayed_with_is_accepted_too(self):
+        build = self.add_build("One")
+        found = self.client.get(
+            "/api/builds?q=%23{}".format(build["id"])).get_json()["builds"]
+        self.assertEqual([b["id"] for b in found], [build["id"]])
+
+    def test_a_number_still_matches_text_containing_it(self):
+        """The id match is an extra, not a special case: a name with the digits still hits."""
+        named = self.add_build("House 2 by the lake")
+        found = self.client.get("/api/builds?q=2").get_json()["builds"]
+        self.assertIn(named["id"], [b["id"] for b in found])
+
+    def test_the_library_can_be_ordered_by_number(self):
+        ids = [self.add_build("B{}".format(n))["id"] for n in range(3)]
+        ascending = self.client.get("/api/builds?sort=id&dir=asc").get_json()["builds"]
+        self.assertEqual([b["id"] for b in ascending], sorted(ids))
+        descending = self.client.get("/api/builds?sort=id&dir=desc").get_json()["builds"]
+        self.assertEqual([b["id"] for b in descending], sorted(ids, reverse=True))
+
+    def test_no_two_builds_share_a_number(self):
+        """The point of the number: it names one build, including among saved duplicates,
+        which are the one case where the name, the dimensions and the hash all match."""
+        path = Path(fx.sponge_v2(self.tmp / "same.schem", 6, 5, 6))
+        ids = []
+        for _ in range(4):
+            res = self.client.post(
+                "/api/builds",
+                data={"schem": (io.BytesIO(path.read_bytes()), path.name),
+                      "name": "Same", "allow_duplicate": "true"},
+                content_type="multipart/form-data")
+            self.assertEqual(res.status_code, 201)
+            ids.append(res.get_json()["build"]["id"])
+        self.assertEqual(len(set(ids)), len(ids))
+
+
+class BlockShapeTests(unittest.TestCase):
+    """The inspect view draws a block's real shape, not a cube for everything.
+
+    Every roof in the library is stairs and slabs, so drawing them as cubes makes a roof
+    unreadable -- and drawing them *wrongly* is worse, because it looks like the schematic
+    is broken when it is not.
+    """
+
+    def setUp(self):
+        self.axes = thumbs._view_axes(35, 30)
+        self.cell = 40
+
+    def sprite(self, base, state):
+        right, down, near = self.axes
+        boxes = thumbs._shape_boxes(base, state)
+        shade, mask, off_x, off_y = thumbs._orbit_sprite(
+            self.cell, right, down, near, boxes, grow=False)
+        return shade, mask, off_x, off_y
+
+    def shade_at(self, shade, off_x, off_y, point):
+        """The shade the stencil carries at one point of the unit cube."""
+        right, down, _ = self.axes
+        px = sum(v * a for v, a in zip(point, right)) * self.cell + off_x
+        py = sum(v * a for v, a in zip(point, down)) * self.cell + off_y
+        return float(shade[int(round(py)), int(round(px))])
+
+    def test_a_slab_fills_half_the_block(self):
+        _, cube, _, _ = self.sprite("stone", {})
+        _, bottom, _, _ = self.sprite("stone_slab", {"type": "bottom"})
+        _, double, _, _ = self.sprite("stone_slab", {"type": "double"})
+        self.assertLess(bottom.sum(), cube.sum())
+        self.assertEqual(double.sum(), cube.sum(), "a double slab is a full block")
+
+    def test_a_stairs_tall_half_is_on_the_side_it_faces(self):
+        """Measured off the library's own roofs: 79% of roof stairs face uphill, which is
+        only geometrically possible if `facing` names the full-height half."""
+        for facing, inside in (("north", (0.5, 0.9, 0.25)), ("south", (0.5, 0.9, 0.75)),
+                               ("west", (0.25, 0.9, 0.5)), ("east", (0.75, 0.9, 0.5))):
+            with self.subTest(facing):
+                boxes = thumbs._shape_boxes("oak_stairs", {"facing": facing,
+                                                           "half": "bottom"})
+                tall = [b for b in boxes if b[1] >= 0.5][0]
+                x, y, z = inside
+                self.assertTrue(b_contains(tall, x, y, z),
+                                "the tall half should cover the {} side".format(facing))
+
+    def test_a_stairs_riser_is_not_painted_over_by_its_own_tread(self):
+        """A stair is two boxes that overlap on screen, so they have to be drawn back to
+        front. Drawn the other way round the tread covers the riser, and a roof of stairs
+        comes out looking like it has bites taken out of every course -- which reads as a
+        corrupt schematic rather than as a rendering bug."""
+        shade, _, off_x, off_y = self.sprite("oak_stairs", {"facing": "north",
+                                                            "half": "bottom"})
+        riser = self.shade_at(shade, off_x, off_y, (0.5, 0.75, 0.5))
+        self.assertAlmostEqual(riser, thumbs._face_shade((0, 0, 1)), places=3,
+                               msg="the riser is showing the tread's shade")
+        tread = self.shade_at(shade, off_x, off_y, (0.5, 0.5, 0.8))
+        self.assertAlmostEqual(tread, thumbs.SHADE_TOP, places=3)
+
+    def test_shapes_that_tile_are_grown_and_thin_ones_are_not(self):
+        """Blocks that butt against their neighbours get a pixel of overlap so rounding
+        cannot open a seam between them; a fence post has space around it and must not."""
+        self.assertTrue(thumbs._tiles("stone"))
+        self.assertTrue(thumbs._tiles("stone_brick_stairs"))
+        self.assertTrue(thumbs._tiles("oak_slab"))
+        self.assertFalse(thumbs._tiles("glass_pane"))
+        self.assertFalse(thumbs._tiles("oak_fence"))
+
+    def test_an_unknown_block_is_drawn_as_a_cube(self):
+        self.assertEqual(thumbs._shape_boxes("some_future_block", {}), thumbs._CUBE_BOX)
+
+
+def b_contains(box, x, y, z):
+    x0, y0, z0, x1, y1, z1 = box
+    return x0 <= x <= x1 and y0 <= y <= y1 and z0 <= z <= z1
+
+
+class InspectViewTests(PairedLibraryTests):
+    """The big render behind Inspect: a camera at any angle, and a cutaway height."""
+
+    DEFAULT = {"yaw": thumbs.VIEW_DEFAULT_YAW, "pitch": thumbs.VIEW_DEFAULT_PITCH}
+
+    def view(self, build, **params):
+        query = "&".join("{}={}".format(k, v) for k, v in params.items())
+        return self.fetch("/api/builds/{}/view.png{}".format(
+            build["id"], ("?" + query) if query else ""))
+
+    def image_of(self, response):
+        from PIL import Image
+        return Image.open(io.BytesIO(response.data)).convert("RGBA")
+
+    def view_file(self, build):
+        return db.build_dir(build["id"], build["slug"]) / "thumb" / "view.png"
+
+    def test_the_view_is_rendered_bigger_than_a_thumbnail(self):
+        build = self.add_build()
+        res = self.view(build, **self.DEFAULT)
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.headers["Content-Type"], "image/png")
+        self.assertEqual(self.image_of(res).size, (thumbs.VIEW_SIZE, thumbs.VIEW_SIZE))
+        self.assertGreater(thumbs.VIEW_SIZE, thumbs.SIZE)
+
+    def test_the_bare_url_is_the_opening_angle(self):
+        """Both angles default to where the viewer opens, so the plain URL is that picture."""
+        build = self.add_build()
+        self.assertEqual(self.view(build).data, self.view(build, **self.DEFAULT).data)
+
+    def test_only_the_opening_angle_is_cached_on_disk(self):
+        """One angle is worth a file; a camera you can drag is not a cache."""
+        build = self.add_build()
+        self.view(build, **self.DEFAULT)
+        self.assertTrue(self.view_file(build).exists())
+
+        self.view(build, yaw=110, pitch=20)
+        self.view(build, **dict(self.DEFAULT, layer=1))
+        self.assertEqual(sorted(p.name for p in self.view_file(build).parent.glob("view*.png")),
+                         ["view.png"])
+
+    def test_any_angle_renders_not_just_the_quarter_turns(self):
+        """The point of the free camera: 17 degrees is as legal a frame as 90."""
+        seen = set()
+        build = self.add_build()
+        for yaw, pitch in ((0, 35), (17, 35), (90, 35), (203, 5), (45, 80)):
+            res = self.view(build, yaw=yaw, pitch=pitch)
+            self.assertEqual(res.status_code, 200, "{}/{}".format(yaw, pitch))
+            self.assertEqual(self.image_of(res).size, (thumbs.VIEW_SIZE, thumbs.VIEW_SIZE))
+            seen.add(res.data)
+        self.assertEqual(len(seen), 5, "every angle should be a different picture")
+
+    def test_yaw_wraps_and_pitch_is_clamped(self):
+        """Yaw is a bearing, so it comes round; pitch stops, because past vertical there is
+        nothing to see but the build upside down."""
+        build = self.add_build()
+        self.assertEqual(self.view(build, yaw=370, pitch=35).data,
+                         self.view(build, yaw=10, pitch=35).data)
+        self.assertEqual(self.view(build, yaw=0, pitch=500).data,
+                         self.view(build, yaw=0, pitch=thumbs.VIEW_PITCH_MAX).data)
+        self.assertEqual(self.view(build, yaw=0, pitch=-500).data,
+                         self.view(build, yaw=0, pitch=thumbs.VIEW_PITCH_MIN).data)
+
+    def test_a_preview_is_smaller_than_the_frame_it_stands_in_for(self):
+        """What a drag in progress asks for: the next angle matters more than this one's
+        detail, so it is rendered small and replaced when the camera stops."""
+        build = self.add_build()
+        preview = self.view(build, yaw=70, pitch=30, preview=1)
+        self.assertEqual(self.image_of(preview).size,
+                         (thumbs.VIEW_PREVIEW_SIZE, thumbs.VIEW_PREVIEW_SIZE))
+        self.assertLess(thumbs.VIEW_PREVIEW_SIZE, thumbs.VIEW_SIZE)
+
+    def test_a_cutaway_is_a_different_picture(self):
+        build = self.add_build()
+        whole = self.view(build, **self.DEFAULT)
+        cut = self.view(build, **dict(self.DEFAULT, layer=1))
+        self.assertEqual(cut.status_code, 200)
+        self.assertNotEqual(cut.data, whole.data)
+
+    def test_a_cutaway_keeps_the_frame_of_the_build_it_was_cut_from(self):
+        """Same scale, same place. A slider that re-centred the build at every height would
+        make the one comparison it exists for -- this floor against the one below -- impossible."""
+        build = self.add_build()
+        whole = self.image_of(self.view(build, **self.DEFAULT)).getbbox()
+        cut = self.image_of(self.view(build, **dict(self.DEFAULT, layer=1))).getbbox()
+        self.assertEqual((whole[0], whole[2]), (cut[0], cut[2]))   # same width, same place
+        self.assertGreater(cut[1], whole[1])       # the roof is gone, so content starts lower
+
+    def test_turning_keeps_the_build_at_one_scale(self):
+        """The camera is fitted against the footprint's diagonal rather than against the angle
+        it is currently at, so spinning it doesn't pump the build in and out of the frame.
+
+        A silhouette does legitimately narrow and widen as a rectangle turns, so the invariant
+        is checked on quarter-turns of a square-footprint build, which are congruent: at one
+        scale they measure the same, at a per-angle scale they would not."""
+        build = self.add_build("Square", dims=(5, 5, 5))
+        widths, heights = [], []
+        for yaw in (0, 90, 180, 270):
+            box = self.image_of(self.view(build, yaw=yaw, pitch=35)).getbbox()
+            widths.append(box[2] - box[0])
+            heights.append(box[3] - box[1])
+        self.assertLessEqual(max(widths) - min(widths), 2, "quarter-turns measure the same")
+        self.assertLessEqual(max(heights) - min(heights), 2)
+
+        # And no angle -- including the widest, across the diagonal -- overflows the frame.
+        for yaw in (15, 45, 135):
+            box = self.image_of(self.view(build, yaw=yaw, pitch=35)).getbbox()
+            self.assertLess(box[0], box[2])
+            self.assertLessEqual(box[2], thumbs.VIEW_SIZE)
+            self.assertLessEqual(box[3], thumbs.VIEW_SIZE)
+
+    def test_the_top_layer_is_served_as_the_whole_build(self):
+        """A slider at the top asks for the picture already on disk, not a re-render."""
+        build = self.add_build()
+        whole = self.view(build, **self.DEFAULT)
+        self.assertEqual(self.view(build, **dict(self.DEFAULT, layer=build["h"] - 1)).data,
+                         whole.data)
+        self.assertEqual(self.view(build, **dict(self.DEFAULT, layer=9999)).data, whole.data)
+
+    def test_a_cut_below_the_build_lands_on_its_bottom_layer(self):
+        """The slider cannot go below 1, so a lower number is a bad URL, not a new view."""
+        build = self.add_build()
+        self.assertEqual(self.view(build, **dict(self.DEFAULT, layer=-5)).data,
+                         self.view(build, **dict(self.DEFAULT, layer=0)).data)
+
+    def test_an_unknown_build_has_no_view(self):
+        self.assertEqual(self.fetch("/api/builds/9999/view.png").status_code, 404)
+
+    def test_re_cropping_throws_the_cached_view_away(self):
+        """A view that outlived its schematic is a picture of a build that isn't there."""
+        build = self.add_build()
+        self.view(build, **self.DEFAULT)
+        self.assertTrue(self.view_file(build).exists())
+
+        res = self.client.post("/api/builds/{}/recrop".format(build["id"]),
+                               json={"min_x": 0, "max_x": 3, "min_y": 0, "max_y": 3,
+                                     "min_z": 0, "max_z": 3})
+        self.assertEqual(res.status_code, 200)
+        self.assertFalse(self.view_file(build).exists())
 
 
 if __name__ == "__main__":

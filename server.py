@@ -66,7 +66,7 @@ MCWORLD_EXTENSIONS = (".mcworld",)
 # server left running while the code changes serves a NEW frontend against an OLD API. The
 # frontend checks this number and says so, instead of silently missing controls whose data
 # never arrived.
-API_VERSION = 6
+API_VERSION = 8
 
 # Everything a build can have a picture of. Whitelisted rather than interpolated: the
 # thumbnail route is the only one that reaches into data/builds/, and the path it builds
@@ -1035,6 +1035,66 @@ def api_build_thumb(build_id: int, kind: str):
     # conditional=True gives ETag/Last-Modified handling, so a Library reload of 40 cards
     # costs 40 x 304 rather than 40 re-downloads.
     return send_file(path, mimetype="image/png", conditional=True)
+
+
+# ── API: the inspect view ─────────────────────────────────────────────────────
+
+# Only the angle the viewer opens at is cached on disk; a dragged camera is two continuous
+# axes of frames, so those are rendered per request and handed to the browser to keep. An
+# hour is comfortably longer than a session spent looking at one build, which is what makes
+# dragging back over ground you have already covered free.
+VIEW_CACHE_SECONDS = 3600
+
+
+@app.get("/api/builds/<int:build_id>/view.png")
+def api_build_view(build_id: int):
+    """One frame of the inspect view: the build seen from `yaw`/`pitch`, cut at `layer`.
+
+    The thumbnail says which build this is; this says what it is made of. Angles are in
+    degrees and the camera is orthographic, so any pair is a legal frame -- the four
+    quarter-turns a grid transpose could give were a limit of the thumbnail's projection, not
+    of the build. `preview` asks for the smaller, coarser render that a drag in progress
+    wants, where the next frame matters more than this one's detail.
+
+    Like the thumbnail route, it reaches into data/builds/ only through thumbs.py, which
+    builds the path from the DB row rather than from anything in the URL.
+    """
+    build = db.get_build(build_id)
+    if build is None:
+        return jsonify(error="Build not found."), 404
+
+    # Both angles default to the one the viewer opens at, so the bare URL is that picture --
+    # and a yaw is a bearing, so it wraps, while a pitch stops at the ends of its arc.
+    yaw = _int_or_none(request.args.get("yaw"))
+    yaw = thumbs.VIEW_DEFAULT_YAW if yaw is None else yaw % 360
+    pitch = _int_or_none(request.args.get("pitch"))
+    pitch = thumbs.VIEW_DEFAULT_PITCH if pitch is None else max(
+        thumbs.VIEW_PITCH_MIN, min(thumbs.VIEW_PITCH_MAX, pitch))
+    preview = _truthy(request.args.get("preview"))
+    layer = _int_or_none(request.args.get("layer"))
+    # A slider at the top is the whole build: fold it onto the plain render rather than
+    # drawing the same picture again under a different URL.
+    if layer is not None and layer >= build["h"] - 1:
+        layer = None
+
+    # The one frame worth keeping on disk: what every viewing of this build opens with.
+    if layer is None and not preview \
+            and yaw == thumbs.VIEW_DEFAULT_YAW and pitch == thumbs.VIEW_DEFAULT_PITCH:
+        path = thumbs.schem_view(build_id, build["slug"])
+        if path is None or not path.exists():
+            return jsonify(error="No view available."), 404
+        return send_file(path, mimetype="image/png", conditional=True)
+
+    image = thumbs.schem_orbit(
+        build_id, build["slug"], yaw=yaw, pitch=pitch,
+        max_layer=None if layer is None else max(layer, 0),
+        size=thumbs.VIEW_PREVIEW_SIZE if preview else thumbs.VIEW_SIZE)
+    if image is None:
+        return jsonify(error="No view available."), 404
+    buffer = io.BytesIO()
+    image.save(buffer, "PNG", optimize=True)
+    return Response(buffer.getvalue(), mimetype="image/png",
+                    headers={"Cache-Control": "private, max-age={}".format(VIEW_CACHE_SECONDS)})
 
 
 # ── API: delete (explicit, confirmed) ─────────────────────────────────────────
