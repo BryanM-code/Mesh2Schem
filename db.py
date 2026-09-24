@@ -90,6 +90,7 @@ def derive_status(has_image: bool, has_glb: bool) -> str:
 
 # Columns a client may sort the Library by -> the SQL expression used for it.
 _SORT_COLUMNS = {
+    "id": "id",
     "name": "name COLLATE NOCASE",
     "added_at": "added_at",
     "paired_at": "paired_at",
@@ -520,6 +521,15 @@ def create_build(name: str, source_note: str, temp_schem_path,
 
 # ── Read / list ───────────────────────────────────────────────────────────────
 
+def build_number(q) -> Optional[int]:
+    """The build number a search names, or None if it doesn't name one.
+
+    Ids are shown to the user as `#42`, so both spellings have to find build 42.
+    """
+    text = str(q or "").strip().lstrip("#").strip()
+    return int(text) if text.isdigit() else None
+
+
 def list_builds(status: Optional[str] = None, q: Optional[str] = None,
                 max_longest: Optional[int] = None, min_longest: Optional[int] = None,
                 sort: str = "added_at", direction: str = "desc") -> list[dict]:
@@ -529,9 +539,18 @@ def list_builds(status: Optional[str] = None, q: Optional[str] = None,
         where.append("status = ?")
         params.append(status)
     if q:
-        where.append("(name LIKE ? OR source_note LIKE ? OR source_url LIKE ?)")
+        # A build's number is the shortest way to name one -- it's on the card, in the
+        # folder name and in the CSV -- so searching for it finds that build. It's an
+        # *extra* match rather than a special case: a query of "42" still turns up every
+        # build with 42 in its name, with build 42 itself among them.
+        clause = "name LIKE ? OR source_note LIKE ? OR source_url LIKE ?"
         like = "%{}%".format(q)
         params.extend([like, like, like])
+        numbered = build_number(q)
+        if numbered is not None:
+            clause += " OR id = ?"
+            params.append(numbered)
+        where.append("(" + clause + ")")
     if max_longest is not None:
         where.append("MAX(w, h, l) <= ?")
         params.append(max_longest)
@@ -652,13 +671,15 @@ def recrop_build(build_id: int, bbox: dict) -> dict:
     finally:
         conn.close()
 
-    # The thumbnail depicts the old crop, so drop it; it re-renders on next view.
-    thumb = build_dir(build_id, row["slug"]) / "thumb" / "schem.png"
-    try:
-        if BUILDS_DIR in thumb.resolve().parents:
-            thumb.unlink(missing_ok=True)
-    except OSError:
-        pass
+    # Every picture of the schematic -- the thumbnail and the cached inspect view -- depicts
+    # the old crop, so drop them both; they re-render on next view.
+    thumbs_dir = build_dir(build_id, row["slug"]) / "thumb"
+    for path in [thumbs_dir / "schem.png"] + sorted(thumbs_dir.glob("view*.png")):
+        try:
+            if BUILDS_DIR in path.resolve().parents:
+                path.unlink(missing_ok=True)
+        except OSError:
+            pass
     return result
 
 

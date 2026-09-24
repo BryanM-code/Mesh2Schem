@@ -36,6 +36,10 @@ exist, and names the first one still missing.
   uncropped input so the box can be **widened** as well as narrowed.
 - **Library** — every build as a **thumbnail grid** or a searchable / filterable / sortable
   table (your choice is remembered), with stage badges, progress pips and a CSV export.
+  Every build carries a **number** (`#42`) that names it on the card, in the table, in the
+  folder on disk and in the export — type it into the search box to jump straight to it.
+- **Inspect** — open any schematic full size, **drag to turn it** to any angle, and **cut it
+  open** layer by layer to see the inside. Rendered server-side from the stored `.schem`.
 - **Reference screenshots** — up to 3 quick captures per build. **Paste straight from the
   clipboard** (`Win+Shift+S` then `Ctrl+V`), drop files, or browse. Optional, and kept at
   full resolution so you can open one later and pick an angle to generate from.
@@ -113,11 +117,19 @@ BuildDataCollector/
   mcworld_preview.py       # top-down map, for picking that region
   schem_voxels.py          # decodes a .schem into a voxel grid (for thumbnails)
   block_colors.py          # blockstate -> approximate RGB (for thumbnails)
-  thumbs.py                # isometric renders of a schem and a glb, cached on disk
+  thumbs.py                # isometric renders of a schem and a glb, cached on disk,
+                           #   plus the free-camera / cutaway view behind Inspect
   glb_validate.py          # validates a .glb loads as a mesh (trimesh)
   image_validate.py        # validates + normalises a dropped reference image
   origin_scan.py           # recovers download URLs from Windows' Mark of the Web
   rebuild_from_disk.py     # CLI safety net (see below)
+  block_roles.py           # what a block is for: terrain / plant / cube / stair variants
+  house_stats.py           # CLI: measures the anatomy of every stored build
+  house_params.py          # frozen, hand-editable sampling parameters for the generator
+  house_grammar.py         # procedural suburban-house generator (footprint -> ... -> plot)
+  schem_write.py           # writes a voxel grid back out as a Sponge .schem
+  gen_houses.py            # CLI: generates + validates a batch of synthetic houses
+  contact_sheet.py         # CLI: tiles a folder of .schem into one PNG for review
   templates/ , static/     # the web UI (no build step)
   tests/                   # unittest suite (see Tests)
   data/
@@ -134,7 +146,25 @@ BuildDataCollector/
         thumb/shot-1.png          # derived; one per screenshot
         thumb/image.png           # derived; absent until an image is attached
         thumb/mesh.png            # derived; absent until paired
+        thumb/view.png            # derived; the angle Inspect opens at
 ```
+
+### Build numbers
+
+The `<build_id>` in each folder name is the build's **number** — the one shown as `#42`
+beside its name everywhere in the app, and the `id` column in the CSV export. It comes from
+the database, is unique across the library, and doesn't move: renaming a build, re-cropping
+it, re-sorting the Library or rebuilding from disk all leave it alone, which is what makes
+it the thing to quote when you mean one specific schematic. Searching the Library for `42`
+or `#42` goes straight to it, and the `#` column sorts by it.
+
+Two caveats worth knowing:
+
+- Numbers are **allocated from the highest one in use**, so deleting the most recently added
+  build frees its number for the next one. Numbers are always unique *among the builds that
+  exist*; they aren't a permanent record of builds that once did.
+- On a second machine they start at 1,000,001 rather than 1 — see
+  [Machine ids](#machine-ids-why-the-mac-needs-bdc_machine_id1).
 
 Every artefact has a canonical filename, so a build's folder can be read at a glance and
 `rebuild_from_disk` can re-derive everything from it. Screenshot slots are stable ids, not
@@ -489,6 +519,47 @@ Thumbnails are 384px and exist only to be *looked at*. To get the real bytes bac
 full-resolution screenshot, the generated image, the `.glb` — use the file route described
 under [Reference screenshots](#reference-screenshots).
 
+### Inspecting a build
+
+A thumbnail says *which* build this is. When you need to know *what it is made of*, hit
+**Inspect** — on a Library card, on the build page, or by clicking the schematic tile there.
+It opens the build at 1024px on a camera you can drag:
+
+| Control | What it does | Keys |
+| --- | --- | --- |
+| **Drag** | turns the camera: sideways for yaw, up and down for pitch, to any angle | `←` `→` `↑` `↓` |
+| **Cut away** | hides everything above a chosen layer, so the roof comes off and you can read the floor plan, the interior walls and the furniture | `[` `]` |
+| **Zoom** | scroll to zoom on the pointer, shift-drag to move a zoomed build, **Fit** to go back | `+` `-` `0` |
+
+The camera is a real orthographic one, so every angle is a legal frame — pitch runs from a
+little below the horizon to nearly straight down, and yaw all the way round. That is a
+different projection from the thumbnail's, whose cube stencil tessellates at exactly one
+angle; turning *that* one meant transposing the grid, which is why it only ever had four
+positions. Here the build is fitted against the diagonal of its footprint rather than
+against the angle it is currently at, so spinning it never pumps it in and out of the frame.
+
+The cutaway is the other half of why this exists: a house's inside is invisible from any
+outside angle, and re-finding the surface *after* the cut is what makes the newly exposed
+floors render properly rather than being lidded over. The frame is fixed, so lowering the
+slider peels the build apart in place instead of re-centring at every height — which is what
+lets you compare one floor with the one below it.
+
+Every frame is a PNG rendered by the same server-side code as the thumbnails: no 3D library
+in the browser, no voxel data shipped to it, and no possibility of the viewer and the Library
+disagreeing about what a build looks like. Dragging therefore costs a round trip per frame,
+and the viewer is built around that:
+
+- **While the camera is moving** it asks for a smaller, coarser render (`?preview=1`), which
+  comes back in a fraction of a second. The full-detail frame is requested the moment you
+  let go.
+- **Only one request is ever in flight.** A camera that keeps moving overwrites where it
+  wants to be next, and that angle is asked for when the reply lands; the angles passed
+  through in between are dropped, because they are stale by then anyway.
+- **Angles snap to 5°**, so turning back the way you came replays frames the browser already
+  has instead of asking for a hair's-breadth-different render of the same view.
+- **One frame is cached on disk** — `thumb/view.png`, the angle every viewing opens at.
+  A camera with two continuous axes is not a cache, so the rest live in the browser's.
+
 ## Stepping a build back
 
 Dropped the wrong file? Any attachment can be detached on its own, without touching the
@@ -736,8 +807,10 @@ block-mapping table, and a set of hostile files — decompression bomb, truncate
 declaring a two-billion-entry list, deeply nested NBT, renamed executables. Also the
 four-stage pipeline and its status derivation, the screenshot slots (the cap, partial
 drops, gap reuse, cascade on delete), the generated-image slot, thumbnail caching and
-path-traversal attempts against it, both migrations against real old databases, and the
-origin scanner's URL-preference rules. Fixtures are generated in
+path-traversal attempts against it, the inspect view (arbitrary angles, yaw wrapping and
+pitch clamping, one scale across a turn, a cutaway keeping the frame of the build it was cut
+from), build numbers as a search and a sort, both migrations against real old databases, and
+the origin scanner's URL-preference rules. Fixtures are generated in
 `tests/schem_fixtures.py`, so no binaries are checked in, and the tests use a throwaway data
 directory rather than your real library.
 
