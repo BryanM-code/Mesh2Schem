@@ -378,6 +378,18 @@ def _shape_boxes(base: str, state: dict):
                 "south": (0.0, y0, 0.5, 1.0, y1, 1.0),
                 "west": (0.0, y0, 0.0, 0.5, y1, 1.0),
                 "east": (0.5, y0, 0.0, 1.0, y1, 1.0)}.get(facing)
+        corner = state.get("shape", "straight")
+        if corner != "straight" and facing in ("east", "west", "north", "south"):
+            ccw = {"north": "west", "west": "south", "south": "east", "east": "north"}
+            side = ccw[facing] if corner.endswith("left") else ccw[ccw[ccw[facing]]]
+            boxes = [step]
+            for ix in (0, 1):
+                for iz in (0, 1):
+                    high = {"east": ix == 1, "west": ix == 0, "north": iz == 0, "south": iz == 1}
+                    occupied = (high[facing] and high[side]) if corner.startswith("outer") else (high[facing] or high[side])
+                    if occupied:
+                        boxes.append((ix*.5,y0,iz*.5,(ix+1)*.5,y1,(iz+1)*.5))
+            return tuple(boxes)
         return (step, tall) if tall else (step,)
 
     if base.endswith("_trapdoor"):
@@ -394,8 +406,29 @@ def _shape_boxes(base: str, state: dict):
 
     if base.endswith("_pane") or base.endswith("_bars"):
         return ((0.44, 0.0, 0.0, 0.56, 1.0, 1.0), (0.0, 0.0, 0.44, 1.0, 1.0, 0.56))
-    if base.endswith(("_fence", "_wall")):
-        return ((0.375, 0.0, 0.375, 0.625, 1.0, 0.625),)
+    if base.endswith("_fence"):
+        boxes = [(0.375, 0.0, 0.375, 0.625, 1.0, 0.625)]
+        for direction in ("east", "west", "north", "south"):
+            if state.get(direction) != "true":
+                continue
+            for y0, y1 in ((.375, .5625), (.75, .9375)):
+                boxes.append({"east": (.5, y0, .4375, 1., y1, .5625),
+                              "west": (0., y0, .4375, .5, y1, .5625),
+                              "north": (.4375, y0, 0., .5625, y1, .5),
+                              "south": (.4375, y0, .5, .5625, y1, 1.)}[direction])
+        return tuple(boxes)
+    if base.endswith("_wall"):
+        boxes = [(0.25, 0., 0.25, .75, 1., .75)] if state.get("up", "true") == "true" else []
+        for direction in ("east", "west", "north", "south"):
+            kind = state.get(direction, "none")
+            if kind == "none":
+                continue
+            height = 1. if kind == "tall" else .875
+            boxes.append({"east": (.5, 0., .3125, 1., height, .6875),
+                          "west": (0., 0., .3125, .5, height, .6875),
+                          "north": (.3125, 0., 0., .6875, height, .5),
+                          "south": (.3125, 0., .5, .6875, height, 1.)}[direction])
+        return tuple(boxes)
     if base.endswith("_fence_gate"):
         return ((0.0, 0.3, 0.44, 1.0, 1.0, 0.56),)
     if base.endswith("_door"):

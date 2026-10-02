@@ -24,3 +24,7 @@ data/builds/*/thumb/
 
 # Temp file written by the conversion step during an origin scan.
 *.originscan.schem
+
+# Synthetic training data (mesh -> .schem pairs) and the asset-metadata cache it is built
+# from. Generated, large, and rebuildable from the index; see docs/mesh-to-schem-plan.md.
+data/synthetic/

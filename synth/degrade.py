@@ -1,0 +1,258 @@
+"""Turn a clean architectural model into what TRELLIS would plausibly have produced.
+
+The model's input at inference is a TRELLIS mesh, so a training input must carry
+TRELLIS's imperfections -- not arbitrary noise. Each step below reproduces one measured
+or documented property:
+
+* **Resolution bottleneck.** TRELLIS generates every object inside a 64^3 sparse structure
+  normalised to the object's longest axis, and decodes a surface at a few times that. So
+  detail is lost RELATIVE to object size: a 30-block house keeps sub-block detail, a
+  200-block tower loses anything under ~2-3 blocks. The clean model is voxelised at
+  `bottleneck` cells across its longest axis (96-160), blurred, and re-extracted with
+  marching cubes: rounded corners, lost railings and mullions, merged thin walls.
+* **Surface noise and "melting".** Smooth low-frequency displacement along the normals
+  (Real2Minecraft's notes call TRELLIS buildings "melted statues").
+* **Holes and floaters.** Measured on the 54 cached TRELLIS meshes: 0% watertight, median
+  11.5k open edges, median 543 connected components. Random face patches are removed and
+  small detached fragments added.
+* **Baked, darkened colour.** Real2Minecraft measured TRELLIS bakes ~2x darker than the
+  photo, with hue drift on real surfaces and baked shadows. Colour is darkened, lit from a
+  random sun direction, hue-rotated and noised.
+* **Hallucinated unseen side.** Surfaces facing away from a random camera get a blend of
+  the mirrored visible side, darker, and sometimes a wrong tint (the "teal walls" failure).
+
+Every parameter is drawn per sample from `sample_params` and stored in the manifest. The
+ranges were tuned once against the cached TRELLIS meshes (`synth.calibrate`, 2026-09-24):
+v0.1 inputs came out too bright, too saturated and too rough.
+"""
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+
+import numpy as np
+
+from mcvoxel.block_palette import lab_to_srgb, srgb_to_lab
+from mcvoxel.grid import voxelize_scene
+from mcvoxel.scene import KIND_SURFACE, Material, SceneMesh
+
+
+@dataclass
+class DegradeParams:
+    bottleneck: int = 128
+    blur_sigma: float = 1.0          # bottleneck voxels
+    surface_noise: float = 0.3       # bottleneck voxels, amplitude of normal displacement
+    noise_wavelength: float = 8.0    # bottleneck voxels
+    hole_fraction: float = 0.02      # share of faces removed in patches
+    hole_patch: int = 40             # faces per hole
+    floaters: int = 20
+    tone_gain: float = 0.7
+    ambient: float = 0.7
+    hue_deg: float = 0.0
+    chroma: float = 1.0
+    color_noise: float = 4.0         # RGB std
+    back_blend: float = 0.5          # how much of the unseen side is the mirrored side
+    back_darken: float = 0.85
+    back_tint_deg: float = 0.0       # 0 = no wrong tint
+    color_smooth: int = 2            # Laplacian passes over vertex colours
+    seed: int = 0
+
+
+def sample_params(rng: np.random.Generator, ranges: dict | None = None) -> DegradeParams:
+    """Draw one sample's parameters from `ranges` (`PipelineConfig.degrade`).
+
+    The defaults are the v0.2 ranges calibrated against the cached TRELLIS meshes
+    (`synth.calibrate`): v0.1 inputs came out too bright, too saturated and too rough.
+    """
+    if ranges is None:
+        from .config import PipelineConfig
+        ranges = PipelineConfig().degrade
+    r = ranges
+
+    def uni(key):
+        return float(rng.uniform(*r[key]))
+
+    def integer(key):
+        return int(rng.integers(r[key][0], r[key][1] + 1))
+
+    tint = float(rng.uniform(*r["back_tint_deg"])) if rng.random() < r["back_tint_prob"] else 0.0
+    return DegradeParams(
+        bottleneck=int(rng.choice(r["bottleneck"])),
+        blur_sigma=uni("blur_sigma"),
+        surface_noise=uni("surface_noise"),
+        noise_wavelength=uni("noise_wavelength"),
+        hole_fraction=uni("hole_fraction"),
+        hole_patch=integer("hole_patch"),
+        floaters=integer("floaters"),
+        tone_gain=uni("tone_gain"),
+        ambient=uni("ambient"),
+        hue_deg=float(rng.normal(0.0, r["hue_deg_sd"])),
+        chroma=uni("chroma"),
+        color_noise=uni("color_noise"),
+        back_blend=uni("back_blend"),
+        back_darken=uni("back_darken"),
+        back_tint_deg=tint,
+        color_smooth=integer("color_smooth"),
+        seed=int(rng.integers(0, 2 ** 31 - 1)),
+    )
+
+
+def degrade(scene: SceneMesh, p: DegradeParams):
+    """Return (degraded SceneMesh in the same file units and frame, info)."""
+    import trimesh
+    from scipy import ndimage
+    from skimage.measure import marching_cubes
+
+    rng = np.random.default_rng(p.seed)
+    lo, hi = scene.bounds
+    extent = float((hi - lo).max())
+    s = p.bottleneck / extent
+    off = -lo * s + 0.5
+    vm = voxelize_scene(scene, s, offset=off, drop_ground=False, keep_largest=False, clean=False,
+                        with_shapes=False, with_colors=True, color_fallback="nearest")
+    pad = 3
+    field = ndimage.gaussian_filter(np.pad(vm.solid.astype(np.float32), pad), p.blur_sigma)
+    if field.max() < 0.5:
+        raise ValueError("model vanished at the bottleneck resolution")
+    verts, faces, _, _ = marching_cubes(field, level=0.5)
+    mesh = trimesh.Trimesh(verts, faces, process=False)
+    if mesh.volume < 0:
+        mesh.invert()
+    normals = np.asarray(mesh.vertex_normals)
+    v = np.asarray(mesh.vertices, dtype=np.float64)
+
+    # Low-frequency displacement along the normal.
+    if p.surface_noise > 0:
+        disp = np.zeros(len(v))
+        for _ in range(4):
+            k = rng.normal(size=3)
+            k *= (2 * np.pi / p.noise_wavelength) / np.linalg.norm(k)
+            disp += np.sin(v @ k + rng.uniform(0, 2 * np.pi))
+        v = v + normals * (disp / 2.0 * p.surface_noise)[:, None]
+
+    # Colour: nearest shell voxel of the clean bottleneck model.
+    shell = vm.shell
+    _, idx = ndimage.distance_transform_edt(~shell, return_indices=True)
+
+    def color_at(points):
+        c = np.clip(np.rint(points - pad).astype(np.int64), 0, np.array(shell.shape) - 1)
+        src = tuple(idx[a][c[:, 0], c[:, 1], c[:, 2]] for a in range(3))
+        return vm.rgb[src].astype(np.float64)
+
+    rgb = color_at(v)
+
+    # Unseen side: mirrored visible side, darker, sometimes tinted.
+    az = rng.uniform(0, 2 * np.pi)
+    el = rng.uniform(np.radians(5), np.radians(35))
+    cam = np.array([np.cos(el) * np.cos(az), np.sin(el), np.cos(el) * np.sin(az)])
+    back = normals @ cam < -0.2
+    if back.any():
+        centre = v.mean(axis=0)
+        mirrored = v[back] - 2.0 * ((v[back] - centre) @ cam)[:, None] * cam[None, :]
+        blend = p.back_blend * color_at(mirrored) + (1 - p.back_blend) * rgb[back]
+        blend *= p.back_darken
+        if p.back_tint_deg:
+            blend = _hue_rotate(blend, p.back_tint_deg, 0.9)
+        rgb[back] = blend
+
+    # Baked lighting, darkening, hue drift, noise, then TRELLIS-smooth colour.
+    sun = np.array([rng.normal(), rng.uniform(0.5, 1.5), rng.normal()])
+    sun /= np.linalg.norm(sun)
+    shade = p.ambient + (1 - p.ambient) * np.clip(normals @ sun, 0, None)
+    rgb = rgb * shade[:, None] * p.tone_gain
+    rgb = _hue_rotate(rgb, p.hue_deg, p.chroma)
+    rgb = rgb + rng.normal(0, p.color_noise, size=rgb.shape)
+    if p.color_smooth:
+        adj = mesh.vertex_adjacency_graph
+        import scipy.sparse as sp
+        n = len(v)
+        rows, cols = zip(*adj.edges()) if adj.number_of_edges() else ((), ())
+        A = sp.coo_matrix((np.ones(len(rows)), (rows, cols)), shape=(n, n))
+        A = (A + A.T).tocsr()
+        deg = np.asarray(A.sum(axis=1)).ravel() + 1.0
+        for _ in range(p.color_smooth):
+            rgb = (A @ rgb + rgb) / deg[:, None]
+    rgb = np.clip(rgb, 0, 255)
+
+    faces = np.asarray(mesh.faces, dtype=np.int64)
+    n_faces_mc = len(faces)
+    faces, holes = _punch_holes(faces, mesh, p, rng)
+    v, faces, rgb, n_float = _add_floaters(v, faces, rgb, normals, p, rng)
+
+    # Back to file units: bottleneck index coords -> scaled frame -> file units.
+    pts_scaled = v - pad + vm.origin + 0.5
+    verts_units = (pts_scaled - off) / s
+    out = SceneMesh(verts=verts_units, faces=faces, uv=np.full((len(verts_units), 2), np.nan),
+                    vcolor=rgb, face_mat=np.zeros(len(faces), np.int32),
+                    materials=[Material(name="trellis_bake", base_rgba=np.ones(4), image=None, image_alpha=None,
+                                        alpha_mode="OPAQUE", kind=KIND_SURFACE)])
+    info = {"params": asdict(p), "mc_faces": int(n_faces_mc), "faces": int(len(faces)),
+            "holes": int(holes), "floater_faces": int(n_float), "back_facing_share": round(float(back.mean()), 3)}
+    info.update(mesh_stats(verts_units, faces))
+    return out, info
+
+
+def mesh_stats(verts, faces):
+    """The three properties measured on the cached TRELLIS meshes, for calibration."""
+    import trimesh
+    m = trimesh.Trimesh(verts, faces, process=False)
+    edges = np.sort(m.edges, axis=1)
+    _, counts = np.unique(edges, axis=0, return_counts=True)
+    comps = trimesh.graph.connected_components(m.face_adjacency, nodes=np.arange(len(faces)))
+    return {"open_edges": int((counts == 1).sum()), "components": int(len(comps)),
+            "watertight": bool((counts == 2).all())}
+
+
+def _hue_rotate(rgb, deg, chroma):
+    lab = srgb_to_lab(np.clip(rgb, 0, 255))
+    t = np.radians(deg)
+    a, b = lab[..., 1], lab[..., 2]
+    lab[..., 1] = (a * np.cos(t) - b * np.sin(t)) * chroma
+    lab[..., 2] = (a * np.sin(t) + b * np.cos(t)) * chroma
+    return lab_to_srgb(lab)
+
+
+def _punch_holes(faces, mesh, p, rng):
+    """Remove `hole_fraction` of the faces as connected patches of ~`hole_patch` faces."""
+    n_holes = int(p.hole_fraction * len(faces) / max(p.hole_patch, 1))
+    if n_holes <= 0:
+        return faces, 0
+    adj = mesh.face_adjacency
+    nbrs = [[] for _ in range(len(faces))]
+    for a, b in adj:
+        nbrs[a].append(b)
+        nbrs[b].append(a)
+    drop = np.zeros(len(faces), bool)
+    for seed in rng.choice(len(faces), size=n_holes, replace=False):
+        frontier, taken = [int(seed)], 0
+        while frontier and taken < p.hole_patch:
+            f = frontier.pop(0)
+            if drop[f]:
+                continue
+            drop[f] = True
+            taken += 1
+            frontier.extend(nbrs[f])
+    return faces[~drop], n_holes
+
+
+def _add_floaters(v, faces, rgb, normals, p, rng):
+    """Small detached copies of surface patches, lifted off along their normal."""
+    if p.floaters <= 0 or len(faces) == 0:
+        return v, faces, rgb, 0
+    new_v, new_f, new_c = [v], [faces], [rgb]
+    base = len(v)
+    added = 0
+    for _ in range(p.floaters):
+        f0 = faces[rng.integers(len(faces))]
+        k = int(rng.integers(1, 6))
+        tri = v[f0]
+        n = normals[f0].mean(axis=0)
+        n /= (np.linalg.norm(n) + 1e-9)
+        lift = n * rng.uniform(0.6, 2.5)
+        for j in range(k):
+            jitter = rng.normal(0, 0.4, size=3)
+            new_v.append(tri + lift + jitter)
+            new_f.append(np.array([[base, base + 1, base + 2]]))
+            new_c.append(rgb[f0])
+            base += 3
+            added += 1
+    return np.vstack(new_v), np.vstack(new_f), np.vstack(new_c), added

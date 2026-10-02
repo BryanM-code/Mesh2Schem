@@ -41,8 +41,14 @@ class WriteError(ValueError):
     """The grid cannot be written as a schematic the library would accept."""
 
 
-def write_schem(grid, names, dest_path, metadata: dict | None = None) -> dict:
+def write_schem(grid, names, dest_path, metadata: dict | None = None,
+                data_version: int | None = None) -> dict:
     """Write `grid` (height, length, width) of palette indices to a Sponge v2 `.schem`.
+
+    `data_version` defaults to `schem_convert.SPONGE_DATA_VERSION` (1.13.2), right for the
+    1.13 names the house generator uses. Pass a later version when the palette holds later
+    blocks -- the mesh -> schem dataset writes 3465 (1.20.1), the version its block
+    vocabulary (deepslate, copper, mangrove, cherry...) belongs to.
 
     `names[i]` is the full blockstate for index i, properties included. Indices that no voxel
     uses are dropped and the palette re-densified: the importer requires indices dense from
@@ -87,7 +93,8 @@ def write_schem(grid, names, dest_path, metadata: dict | None = None) -> dict:
 
     schematic = Compound({
         "Version": Int(2),
-        "DataVersion": Int(schem_convert.SPONGE_DATA_VERSION),
+        "DataVersion": Int(schem_convert.SPONGE_DATA_VERSION if data_version is None
+                           else int(data_version)),
         "Metadata": _metadata(metadata, Compound, String, Int),
         "Width": Short(width), "Height": Short(height), "Length": Short(length),
         "Offset": IntArray([0, 0, 0]),
@@ -95,7 +102,7 @@ def write_schem(grid, names, dest_path, metadata: dict | None = None) -> dict:
         "Palette": Compound({state: Int(slot) for state, slot in palette.items()}),
         "BlockData": ByteArray(schem_convert._encode_varints(indices, len(palette), np)),
         "BlockEntities": List[Compound]([]),
-    })
+    }
     schem_convert._write_sponge(nbtlib.File(schematic), dest_path)
 
     return {"width": width, "height": height, "length": length, "volume": volume,

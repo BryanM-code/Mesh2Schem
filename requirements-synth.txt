@@ -1,0 +1,8 @@
+# Offline synthetic-dataset tooling (synth/). NOT needed to run the Flask app.
+#   .venv\Scripts\python -m pip install -r requirements.txt -r requirements-synth.txt
+#
+# mcvoxel is the voxel core shared with Real2Minecraft, installed editable from the
+# sibling checkout. Real2Minecraft has no git remote yet, so a second machine needs a copy
+# of that folder next to this one.
+-e ../Real2Minecraft
+scikit-image>=0.22
