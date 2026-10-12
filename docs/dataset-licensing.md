@@ -73,7 +73,7 @@ Per use:
 | **T** training | tiers A+B+C, privately |
 | **D** derived data | never: no schematics or derived pairs are redistributed |
 | **E** generated examples | never: no renders are redistributed |
-| **C** code | unaffected (the repository holds no schematics) |
+| **C** code | unaffected: both repositories are public and hold code and docs only. No schematics, screenshots, pairs or weights are committed (`.gitignore` blocks them; history scrubbed 2026-10-11) |
 | **M** trained model | **release rule:** any public release or commercial use of model weights requires retraining on tier A only, or re-auditing licences first |
 
 Every build keeps its provenance and licence fields.

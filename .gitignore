@@ -4,8 +4,8 @@ __pycache__/
 venv/
 env/
 
-# The library's FILES are tracked (data/builds/) so they travel between machines --
-# that is the point of the repo. See "Working from two machines" in the README.
+# Since 2026-10-11 NO data is tracked: data/builds/ stays local (licences; the repo is
+# public, code and docs only). Sync data between machines outside git; see the README.
 
 # The database is NOT tracked, deliberately. It is binary, so git cannot merge two
 # machines' changes to it; and it is derivable, so it does not need to be. Everything the
@@ -30,3 +30,32 @@ data/builds/*/thumb/
 data/synthetic/
 data/architecture-audit-v1/
 data/
+
+# ── Data never goes in this repo (licences: see docs). Code and docs only. ──
+# Minecraft builds and worlds
+*.schem
+*.schematic
+*.litematic
+*.nbt
+*.mcstructure
+*.mcworld
+# Meshes, voxel arrays and training pairs
+*.glb
+*.gltf
+*.obj
+*.mtl
+*.ply
+*.npz
+*.npy
+# Model weights
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+# Local data folders
+data/
+datasets/
+pairs/
+checkpoints/
+runs/

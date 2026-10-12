@@ -593,6 +593,12 @@ action is available in the app via the **Rebuild from disk** button on the Libra
 
 ## Working from two machines
 
+> **Changed 2026-10-11:** `data/builds/` is no longer in git. The repo is public and holds
+> code and docs only, so the schematics and screenshots (third-party, licences unclear) stay
+> local. Copy `data/builds/` between machines yourself (USB, cloud drive or a private repo);
+> the database still rebuilds from it on startup. The rest of this section describes the old
+> git-based sync and is kept for reference.
+
 The repo carries the library. Clone it on the other machine, run the app, and you have the
 same builds — add, edit and delete from either, commit, and pull on the other side.
 
@@ -627,8 +633,8 @@ you'll see `synced from data/builds/: N added` in the startup banner.
 
 | | Tracked? | Why |
 | --- | --- | --- |
-| `data/builds/**` | **yes** | the library itself: schematics, screenshots, images, meshes |
-| `data/builds/*/meta.json` | **yes** | the names, notes and source URLs you typed |
+| `data/builds/**` | **no** (since 2026-10-11) | the library itself: schematics, screenshots, images, meshes — local only |
+| `data/builds/*/meta.json` | **no** (since 2026-10-11) | the names, notes and source URLs you typed — local only |
 | `data/collector.db` | no | binary — git cannot merge two machines' changes to it |
 | `data/builds/*/thumb/` | no | a derived cache, re-rendered on demand |
 | `.venv/` | no | per-machine, and platform-specific |
