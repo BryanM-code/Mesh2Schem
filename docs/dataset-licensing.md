@@ -38,7 +38,7 @@ learning is unsettled, the row says so and the policy takes the conservative rea
 | Building3D (Estonia) | CC BY-NC-SA 4.0 | NC only | NC-SA | yes | NC-SA | NC-SA | Avoid unless NC accepted |
 | ArchiSet, BuildingWorld | not located / not released | — | — | — | — | — | Not available |
 | Real Minecraft builds in `data/builds/` | creator's copyright; licence unknown for 105 of 106 | local eval only | **no** | yes | only with permission | see below | **Evaluation only** |
-| Human-built schematic dataset (2026-10, ~317 builds) | per build: tiers A / B / C / X | A+B+C, privately | **no** | yes | **no** | tier A retrain or re-audit first | **Train privately** ([below](#schematic-dataset-2026-10)) |
+| Human-built schematic dataset (real-schems-v1, 321 builds) | per build: tiers A / B / C / X | A+B+C, privately | **no** | yes | **no** | tier A retrain or re-audit first | **Train privately** ([below](#schematic-dataset-2026-10)) |
 | TRELLIS (image → mesh) | MIT (code and weights) | yes | yes | yes | yes | yes | Use |
 | Minecraft block names / game | Mojang usage guidelines | yes | yes | yes | yes, with disclaimer | yes | See notes |
 
@@ -48,8 +48,9 @@ Decision **D14** ([plan, version 4](mesh-to-schem-plan.md#version-4-2026-10-11-s
 which supersedes D6 for this dataset. The Objaverse policy below is unchanged and still
 governs the parked Objaverse path.
 
-The dataset is ~317 human-built realistic schematics from Planet Minecraft and Abfielder,
-collected at `C:\Users\mendo\Documents\Codex\2026-10-05\find-and-download-30-high-quality-2\outputs\Real2Minecraft_Dataset\`.
+The dataset is 321 human-built realistic schematics from Planet Minecraft and Abfielder,
+collected at `C:\Users\mendo\Documents\Codex\2026-10-05\find-and-download-30-high-quality-2\outputs\Real2Minecraft_Dataset\`
+and frozen as [real-schems-v1](real-schems-v1.md) (tiers A 43 / B 265 / C 11 / X 2).
 Status: **personal research prototype**.
 
 | Tier | Meaning | Trained on |
