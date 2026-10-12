@@ -102,7 +102,7 @@ def write_schem(grid, names, dest_path, metadata: dict | None = None,
         "Palette": Compound({state: Int(slot) for state, slot in palette.items()}),
         "BlockData": ByteArray(schem_convert._encode_varints(indices, len(palette), np)),
         "BlockEntities": List[Compound]([]),
-    }
+    })
     schem_convert._write_sponge(nbtlib.File(schematic), dest_path)
 
     return {"width": width, "height": height, "length": length, "volume": volume,

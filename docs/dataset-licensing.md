@@ -38,8 +38,45 @@ learning is unsettled, the row says so and the policy takes the conservative rea
 | Building3D (Estonia) | CC BY-NC-SA 4.0 | NC only | NC-SA | yes | NC-SA | NC-SA | Avoid unless NC accepted |
 | ArchiSet, BuildingWorld | not located / not released | — | — | — | — | — | Not available |
 | Real Minecraft builds in `data/builds/` | creator's copyright; licence unknown for 105 of 106 | local eval only | **no** | yes | only with permission | see below | **Evaluation only** |
+| Human-built schematic dataset (2026-10, ~317 builds) | per build: tiers A / B / C / X | A+B+C, privately | **no** | yes | **no** | tier A retrain or re-audit first | **Train privately** ([below](#schematic-dataset-2026-10)) |
 | TRELLIS (image → mesh) | MIT (code and weights) | yes | yes | yes | yes | yes | Use |
 | Minecraft block names / game | Mojang usage guidelines | yes | yes | yes | yes, with disclaimer | yes | See notes |
+
+## Schematic dataset (2026-10)
+
+Decision **D14** ([plan, version 4](mesh-to-schem-plan.md#version-4-2026-10-11-schematic-first-pivot)),
+which supersedes D6 for this dataset. The Objaverse policy below is unchanged and still
+governs the parked Objaverse path.
+
+The dataset is ~317 human-built realistic schematics from Planet Minecraft and Abfielder,
+collected at `C:\Users\mendo\Documents\Codex\2026-10-05\find-and-download-30-high-quality-2\outputs\Real2Minecraft_Dataset\`.
+Status: **personal research prototype**.
+
+| Tier | Meaning | Trained on |
+| --- | --- | --- |
+| A | explicit reuse permission | yes, privately |
+| B | licence unclear | yes, privately |
+| C | personal-use / noncommercial | yes, privately |
+| X | excluded | no |
+
+Tier X now:
+
+| Build | Why excluded |
+| --- | --- |
+| Costanera | CC BY-NC-ND: no derivatives |
+| Xorph barn | no redistribution |
+
+Per use:
+
+| Use | Rule |
+| --- | --- |
+| **T** training | tiers A+B+C, privately |
+| **D** derived data | never: no schematics or derived pairs are redistributed |
+| **E** generated examples | never: no renders are redistributed |
+| **C** code | unaffected (the repository holds no schematics) |
+| **M** trained model | **release rule:** any public release or commercial use of model weights requires retraining on tier A only, or re-auditing licences first |
+
+Every build keeps its provenance and licence fields.
 
 ## Objaverse 1.0 in detail
 
@@ -141,6 +178,8 @@ Attribution is carried mechanically so it never has to be reconstructed:
   also falls under Japan's Surveying Act. That must be checked per dataset before use.
 
 ## The real Minecraft builds in this library
+
+*For the 2026-10 schematic dataset see [Schematic dataset (2026-10)](#schematic-dataset-2026-10); the evaluation-only split here was D9, superseded by D17.*
 
 105 of the 106 real builds have no recorded source URL; the one that does records only
 PlanetMinecraft's front page. Their licences are therefore unknown, and build creators

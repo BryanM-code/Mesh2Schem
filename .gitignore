@@ -29,3 +29,4 @@ data/builds/*/thumb/
 # from. Generated, large, and rebuildable from the index; see docs/mesh-to-schem-plan.md.
 data/synthetic/
 data/architecture-audit-v1/
+data/

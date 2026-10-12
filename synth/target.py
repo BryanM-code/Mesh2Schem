@@ -99,7 +99,8 @@ def quality(vm):
 def make_target(scene, blocks_per_unit, offset, cfg, max_plate, scale_info=None, detail_material_hint=None) -> TargetResult:
     vm = voxelize_scene(scene, blocks_per_unit, offset, fine_scale=cfg.fine_scale, max_plate=max_plate,
                         site_height=site_height_blocks(cfg, scale_info), site_margin=cfg.site_margin,
-                        color_mode=cfg.color_mode, clean=cfg.close_gaps)
+                        color_mode=cfg.color_mode, clean=cfg.close_gaps,
+                        architecture=cfg.architecture_mode == 'coherent')
     info = {"voxels": vm.info}
     if detail_material_hint in ("wood", "masonry") and vm.post_family is not None:
         vm.post_family[vm.post_mask & (vm.post_family == 0)] = 1 if detail_material_hint == "wood" else 2
@@ -124,9 +125,11 @@ def make_target(scene, blocks_per_unit, offset, cfg, max_plate, scale_info=None,
     m = cfg.margin
     vm = pad_model(vm, ((m, m), (0, m), (m, m)))
     verts_grid = scene.verts * blocks_per_unit + np.asarray(offset, dtype=np.float64) - vm.origin
-    vm_b, plan = roofs.builder_roofs(vm, verts_grid, scene.faces, roofs.RoofParams(sub=cfg.fine_scale), scene=scene)
+    vm_b, plan = roofs.builder_roofs(vm, verts_grid, scene.faces,
+                                   roofs.RoofParams(sub=cfg.fine_scale, coherent=cfg.architecture_mode == 'coherent'), scene=scene)
     pal = palette_ids(cfg)
     kw = {"shadow_repaint": cfg.shadow_repaint, "palette": pal, "quantize": cfg.quantize}
+    kw['coherent_materials'] = cfg.architecture_mode == 'coherent'
     geometric = assign_blocks(vm, **kw)
     builder = assign_blocks(vm_b, **kw)
     info["roofs"] = {**vm_b.info.get("roofs", {}),

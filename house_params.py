@@ -1,5 +1,7 @@
 """Frozen sampling parameters for the house generator, distilled from the real library.
 
+PARKED: see docs/mesh-to-schem-plan.md v4
+
 `house_stats` measures; this decides what the generator does with the measurements. The two
 are deliberately separate files, and this one is checked in and edited by hand.
 

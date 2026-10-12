@@ -126,7 +126,7 @@ def render_roof_regions(plan, size=SIZE):
         draw.text((8+(x+.5)*ratio,8+(z+.5)*ratio),str(r),fill='white')
     y=int(size*.6)+16
     for row in sorted(records,key=lambda r:-r['columns'])[:max(1,(size-y)//14)]:
-        r=row['region'];draw.rectangle((8,y+2,16,y+10),fill=lut[r])
+        r=row['region'];draw.rectangle((8,y+2,16,y+10),fill=lut.get(r, (100,100,100)))
         draw.text((22,y),f"{r}: {row['pattern']} {row['direction'] or ''} ({row['columns']} cols)",fill='white')
         y+=14
     return out

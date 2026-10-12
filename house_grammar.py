@@ -1,5 +1,7 @@
 """Grow a suburban house from a seed, using proportions measured off the real library.
 
+PARKED: see docs/mesh-to-schem-plan.md v4
+
 This is the generator half of the synthetic-build tool. It is a **grammar**, not a model:
 footprint, then walls, then roof, then openings, then trim, then the plot -- each stage a
 small function that reads the sampled spec and writes voxels. Nothing here is learned. Every

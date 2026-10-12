@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Generate synthetic suburban houses as importable `.schem` files.
 
+PARKED: see docs/mesh-to-schem-plan.md v4
+
 Usage:  python gen_houses.py --count 16 [--seed 1000] [--out data/.tmp/synthetic]
                              [--roof gable] [--storeys 2] [--wall minecraft:bricks]
                              [--size small|medium|large] [--plan L]

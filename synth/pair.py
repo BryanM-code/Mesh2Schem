@@ -203,6 +203,14 @@ def make_pair(rec: dict, glb_path, out_dir, cfg, seed: int) -> dict:
     jitter[1] = 0.0                                     # ground sits on a block boundary
     offset = -lo * bpu + jitter
     man["scale"]["offset_jitter"] = [round(float(v), 3) for v in jitter]
+    if cfg.grid_alignment == 'geometry':
+        from mcvoxel.architecture import align_grid
+        offset, man['scale']['alignment'] = align_grid(scene.verts, scene.faces, bpu)
+    elif cfg.grid_alignment != 'jitter':
+        raise ValueError('unknown grid_alignment: '+cfg.grid_alignment)
+    # Store full precision for exact replay; offset_jitter remains legacy provenance.
+    man['scale']['offset_blocks'] = [float(v) for v in offset]
+    man['representation_version'] = 'architecture-v1' if cfg.architecture_mode == 'coherent' else 'legacy'
     # Objaverse++ marks models that stand on a modelled plot; only those may lose more than a
     # 3-layer base, so a real podium on any other model survives.
     max_plate = 0.35 if rec.get("pool_kind") == "plot" else 3
@@ -235,7 +243,8 @@ def make_pair(rec: dict, glb_path, out_dir, cfg, seed: int) -> dict:
     except Exception as exc:
         reject("degrade", "degrade_failed", str(exc)[:200])
     vin = voxelize_scene(deg, bpu, offset, origin=vm.origin, shape=vm.solid.shape, with_shapes=False,
-                         crop=False, max_plate=max_plate, fine_scale=cfg.fine_scale)
+                         crop=False, max_plate=max_plate, fine_scale=cfg.fine_scale,
+                         architecture=cfg.architecture_mode == 'coherent')
     man["input_voxels"] = vin.info
     t["input"] = time.time() - t0
 
@@ -275,6 +284,14 @@ def make_pair(rec: dict, glb_path, out_dir, cfg, seed: int) -> dict:
     man["validation"]["blockstates_data_version"] = TARGET_DATA_VERSION
     np.savez_compressed(out_dir / "roof_plan.npz", **{k: getattr(tr.plan,k) for k in
                         ("cls", "facing", "level", "shape", "region", "group")})
+    if cfg.architecture_mode == 'coherent':
+        from .architecture_metrics import measure
+        man['architecture_diagnostics'] = measure(scene.verts*bpu+offset-vm.origin, scene.faces,
+                                                  grid_p, names_p, tr.plan, vm)
+        man['architecture_diagnostics']['visual_approval'] = 'not_established'
+        for i, layer in enumerate(tr.plan.layers):
+            np.savez_compressed(out_dir / ('roof_plan_layer_%d.npz' % (i+1)), **{k: getattr(layer,k) for k in
+                                ('cls','facing','level','shape','region','group')})
     arrays = {"shape": _yzx(primary.shape), "material": _yzx(primary.material)}
     grid_o = names_o = None
     if cfg.store_geometric:

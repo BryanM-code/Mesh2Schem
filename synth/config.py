@@ -30,7 +30,7 @@ import json
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
-PIPELINE_VERSION = "synth-2.2.0"
+PIPELINE_VERSION = "synth-2.3.0"
 
 
 @dataclass
@@ -62,6 +62,13 @@ class PipelineConfig:
 
     # ── scale: 1 block = 1 metre ──────────────────────────────────────────────
     blocks_per_metre: float = 1.0
+    # Explicit opt-in while architecture-v1 remains under visual evaluation. Loading
+    # historical configs keeps the legacy path; no existing dataset is reinterpreted.
+    architecture_mode: str = "legacy"        # legacy | coherent
+    scale_policy: str = "legacy"             # legacy | architecture
+    grid_alignment: str = "jitter"           # jitter | geometry
+    architecture_enlargement: float = 1.0    # minimum requested representation/physical scale
+    architecture_feature_blocks: float = 2.0
     scale_jitter: float = 0.05               # +-5%, drawn per sample, recorded
     max_height_blocks: int = 300             # taller buildings are scaled to fit (height_capped)
     small_building_blocks: int = 16          # flag (not reject) when footprint and height are both below
@@ -149,6 +156,13 @@ class PipelineConfig:
     def hash(self) -> str:
         """Short content hash of every setting that can change a pair (not the run name)."""
         d = asdict(self)
+        # Preserve the hashes of old, replayable configs when all new controls are off.
+        new_defaults = {'architecture_mode': 'legacy', 'scale_policy': 'legacy',
+                        'grid_alignment': 'jitter', 'architecture_enlargement': 1.,
+                        'architecture_feature_blocks': 2.}
+        for key, value in new_defaults.items():
+            if d.get(key) == value:
+                d.pop(key, None)
         for k in ("run_name", "data_root", "tmp_dir", "keep_raw", "storage_budget_gb", "renders", "render_size"):
             d.pop(k, None)
         return hashlib.sha256(json.dumps(d, sort_keys=True).encode()).hexdigest()[:12]

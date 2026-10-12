@@ -140,6 +140,37 @@ def choose_scale(record: dict, scene, cfg, rng: np.random.Generator):
     height_u = float(ext[1])
     height_m, info = estimate_height_m(record, height_u, rng)
     jitter = float(rng.uniform(1.0 - cfg.scale_jitter, 1.0 + cfg.scale_jitter))
+    if cfg.scale_policy == 'architecture':
+        from mcvoxel.architecture import resolution_evidence
+        physical_bpu = height_m * cfg.blocks_per_metre / height_u
+        evidence = resolution_evidence(scene.verts, scene.faces, physical_bpu, cfg.architecture_feature_blocks)
+        # The pilot shows that repeating trim can masquerade as feature spacing.
+        # This is advisory evidence until source/scale review establishes which
+        # features matter. The requested representation multiplier is explicit.
+        enlargement = float(cfg.architecture_enlargement)
+        if not math.isfinite(enlargement) or enlargement < 1:
+            raise ValueError('architecture_enlargement must be finite and at least 1')
+        bpu = physical_bpu * enlargement
+        dims = np.ceil(ext * bpu + 2 * cfg.margin + 2).astype(np.int64)
+        info.update(height_m=round(height_m, 2), physical_blocks_per_unit=physical_bpu,
+                    blocks_per_metre=cfg.blocks_per_metre, effective_blocks_per_metre=cfg.blocks_per_metre*enlargement,
+                    blocks_per_unit=bpu, height_blocks=float(height_u*bpu),
+                    bbox_footprint_blocks=float(max(ext[0], ext[2])*bpu), jitter=1.,
+                    enlargement=enlargement, representation_version='architecture-v1', resolution=evidence,
+                    height_capped=False, size_capped=False, scale_uncertain=info['confidence']=='low',
+                    resolution_uncertain=evidence['confidence']!='high', required_grid_xyz=dims.tolist())
+        exceeds = []
+        if int(np.prod(dims)) > cfg.max_grid_voxels: exceeds.append('grid_voxels')
+        if ext[1]*bpu > cfg.max_height_blocks: exceeds.append('height_blocks')
+        if max(ext[0],ext[2])*bpu > cfg.max_site_blocks: exceeds.append('site_blocks')
+        if exceeds:
+            info['resource_status'] = 'deferred'; info['exceeded_limits'] = exceeds
+            raise ScaleRejected('resolution_budget', 'requested architectural scale exceeds '+', '.join(exceeds)+
+                                '; increase limits or explicitly revise representation scale; no automatic downscale', info)
+        info['resource_status'] = 'fits'
+        return bpu, info
+    if cfg.scale_policy != 'legacy':
+        raise ValueError('unknown scale_policy: '+cfg.scale_policy)
     bpu = height_m * cfg.blocks_per_metre * jitter / height_u
     info["height_capped"] = False
     if height_u * bpu > cfg.max_height_blocks:

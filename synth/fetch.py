@@ -1,5 +1,7 @@
 """Download one Objaverse GLB from the Hugging Face mirror, verified when a hash is known.
 
+PARKED: see docs/mesh-to-schem-plan.md v4
+
 Streaming by design: the pilot keeps each GLB only until its pair is written (see
 `synth.run`, `keep_raw`). The full dataset would be ~100-165 GB of meshes but ~5-10 GB of
 pairs, and the machine has ~164 GB free.

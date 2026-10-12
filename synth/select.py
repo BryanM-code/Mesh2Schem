@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Choose a run's assets: licence and metadata filters first, then quotas for diversity.
 
+PARKED: see docs/mesh-to-schem-plan.md v4
+
 Usage:  python -m synth.select --config data/synthetic/pilot-v2/run_config.json
                                [--size 200] [--prefer-cached DIR]
 

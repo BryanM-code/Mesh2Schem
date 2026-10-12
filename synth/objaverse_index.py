@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Index Objaverse 1.0 for buildings, from metadata only.
 
+PARKED: see docs/mesh-to-schem-plan.md v4
+
 Usage:  python -m synth.objaverse_index [--cache data/synthetic/cache/objaverse] [--download]
 
 Reads the four metadata sources (nothing here downloads a mesh):

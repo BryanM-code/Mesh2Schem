@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Run a selection through the pipeline: download, process, validate, save, delete the raw file.
 
+PARKED: see docs/mesh-to-schem-plan.md v4
+
 Usage:  python -m synth.run --config data/synthetic/pilot-v2/run_config.json
                             [--workers 6] [--limit N] [--only UID ...] [--force]
                             [--raw-cache DIR]

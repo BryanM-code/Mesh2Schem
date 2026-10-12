@@ -1,6 +1,22 @@
 # Mesh-to-Schem dataset pipeline
 
-Current phase: dataset quality review only. No model training or large dataset generation.
+## Status (2026-10-11)
+
+Schematic-first pivot ([plan, version 4](mesh-to-schem-plan.md#version-4-2026-10-11-schematic-first-pivot)):
+human-built schematics are the training targets and inputs are derived from them. The rest
+of this document describes the version 3 Objaverse pipeline; the parts marked ACTIVE carry
+over to the new pairs.
+
+| Part | Files | Status |
+| --- | --- | --- |
+| Objaverse synth path | `synth/select.py`, `synth/fetch.py`, `synth/objaverse_index.py`, `synth/run.py` | **PARKED** (D13): kept, possible pretraining source |
+| Grammar houses | `house_grammar.py`, `gen_houses.py`, `house_params.py` | **PARKED** |
+| The 16 synthetic-house builds in `data/builds/` | — | **EXCLUDED** from any real-build dataset |
+| TRELLIS-like degradation, real-TRELLIS comparison, real evaluation | `synth/degrade.py`, `synth/trellis_compare.py`, `synth/real_eval.py` | **ACTIVE**, reused |
+| Shared voxel core | Real2Minecraft `mcvoxel/` | **ACTIVE**, reused |
+| Rule-based building mode | Real2Minecraft `building/` | **ACTIVE** as the baseline (D18) |
+
+*Version 3 status, superseded by the table above:* Current phase: dataset quality review only. No model training or large dataset generation.
 The resumed audit and 40-source follow-up are documented in
 [dataset-quality-audit.md](dataset-quality-audit.md). Historical pilots are preserved;
 `pilot-v3` stopped at 193/200 and predates the final crop/size fixes. Use `pilot-v4` for
