@@ -8,7 +8,8 @@ failure strings (empty = valid). A pair that fails is recorded as rejected with 
 * air is air in both maps, ignore is ignore in both maps;
 * ignored voxels are interior -- nothing a camera could see is left unsupervised;
 * the outer layer (sides and top) is air, so the margin of supervised air exists;
-* stairs only on stair-capable materials, slabs only on slab-capable ones, glass only full;
+* every supervised (shape, material) pair is one the vocabulary holds (`vocab.VALID`):
+  stairs only on materials with stairs, slabs on materials with slabs, and so on;
 * the input grid has exactly the target's shape (same frame, voxel for voxel);
 * input and target overlap (occupancy IoU above a floor), so a pair is not misregistered;
 * the written .schem reads back block for block (checked where it is written).
@@ -17,20 +18,12 @@ from __future__ import annotations
 
 import numpy as np
 
-from mcvoxel import block_shapes as bs
 from mcvoxel import vocab
-from mcvoxel.block_palette import AUX_PALETTE
 
 MIN_IOU = 0.2
 
-_STAIRS = np.zeros(len(vocab.MATERIALS), dtype=bool)
-_SLABS = np.zeros(len(vocab.MATERIALS), dtype=bool)
-_GLASS = np.zeros(len(vocab.MATERIALS), dtype=bool)
-for _i, _m in enumerate(vocab.MATERIALS):
-    _slab, _stairs = bs.BLOCK_VARIANTS.get(_m, (None, None))
-    _STAIRS[_i] = _stairs is not None
-    _SLABS[_i] = _slab is not None
-    _GLASS[_i] = _m in AUX_PALETTE
+_STAIR_LABELS = [i for i, s in enumerate(vocab.SHAPES) if s.startswith("stairs_")]
+_SLAB_LABELS = [vocab.SHAPE_SLAB_BOTTOM, vocab.SHAPE_SLAB_TOP]
 
 
 def check_target(shape, material, label=""):
@@ -63,22 +56,20 @@ def check_target(shape, material, label=""):
     outer[0], outer[-1], outer[:, :, 0], outer[:, :, -1], outer[:, -1] = True, True, True, True, True
     if (~air & outer).any():
         f.append(p + "the outer layer is not all air (margin missing)")
-    solid = ~air & ~ign
+    solid = ~air & ~ign & ok_shape
+    sh = np.where(solid, shape, 0).astype(np.int64)
     mat = np.where(solid, material, 0).astype(np.int64)
-    stairs = solid & (shape >= 4) & (shape <= 7)
-    if (stairs & ~_STAIRS[mat]).any():
-        f.append(p + "{} stairs on materials without stairs".format(int((stairs & ~_STAIRS[mat]).sum())))
-    slabs = solid & ((shape == 2) | (shape == 3))
-    if (slabs & ~_SLABS[mat]).any():
-        f.append(p + "{} slabs on materials without slabs".format(int((slabs & ~_SLABS[mat]).sum())))
-    for sh, family in ((vocab.SHAPE_FENCE, bs.FENCE_VARIANTS), (vocab.SHAPE_WALL, bs.WALL_VARIANTS)):
-        compatible = np.array([m in family for m in vocab.MATERIALS])
-        bad = solid & (shape == sh) & ~compatible[mat]
-        if bad.any():
-            f.append(p + "{} {} labels on incompatible materials".format(int(bad.sum()), vocab.SHAPES[sh]))
-    glass_partial = solid & _GLASS[mat] & (shape != 1)
-    if glass_partial.any():
-        f.append(p + "{} glass voxels are not full blocks".format(int(glass_partial.sum())))
+    invalid = solid & ~vocab.VALID[sh, mat]
+    stairs = invalid & np.isin(shape, _STAIR_LABELS)
+    if stairs.any():
+        f.append(p + "{} stairs on materials without stairs".format(int(stairs.sum())))
+    slabs = invalid & np.isin(shape, _SLAB_LABELS)
+    if slabs.any():
+        f.append(p + "{} slabs on materials without slabs".format(int(slabs.sum())))
+    other = invalid & ~stairs & ~slabs
+    for label in np.unique(shape[other]).tolist():
+        f.append(p + "{} {} labels on incompatible materials".format(
+            int((other & (shape == label)).sum()), vocab.SHAPES[label]))
     if not solid.any():
         f.append(p + "no supervised solid voxel")
     return f

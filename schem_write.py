@@ -42,13 +42,18 @@ class WriteError(ValueError):
 
 
 def write_schem(grid, names, dest_path, metadata: dict | None = None,
-                data_version: int | None = None) -> dict:
+                data_version: int | None = None, validate: bool | None = None) -> dict:
     """Write `grid` (height, length, width) of palette indices to a Sponge v2 `.schem`.
 
     `data_version` defaults to `schem_convert.SPONGE_DATA_VERSION` (1.13.2), right for the
     1.13 names the house generator uses. Pass a later version when the palette holds later
-    blocks -- the mesh -> schem dataset writes 3465 (1.20.1), the version its block
-    vocabulary (deepslate, copper, mangrove, cherry...) belongs to.
+    blocks: the parked Objaverse dataset writes 3465 (1.20.1); training targets in the
+    mcvox-v3 vocabulary write `mcvoxel.vocab.TARGET_DATA_VERSION` (4671, 1.21.11, D21).
+
+    `validate` checks every placed blockstate against that version's block table
+    (`mcvoxel.vocab.validate_state`) before writing, and raises `WriteError` naming the bad
+    states. It defaults to on when `data_version` is the target version, off otherwise (the
+    1.13 house generator has no table to check against).
 
     `names[i]` is the full blockstate for index i, properties included. Indices that no voxel
     uses are dropped and the palette re-densified: the importer requires indices dense from
@@ -85,6 +90,7 @@ def write_schem(grid, names, dest_path, metadata: dict | None = None,
     # because an all-solid build still needs a slot for the importer's air checks and because
     # a palette without it reads oddly to every other tool.
     used = sorted({str(names[i]) for i in np.unique(flat)} | {AIR})
+    _check_states(used, data_version, validate)
     palette = {state: slot for slot, state in enumerate(used)}
     remap = np.zeros(len(names), dtype=np.uint16)
     for i, name in enumerate(names):
@@ -107,6 +113,31 @@ def write_schem(grid, names, dest_path, metadata: dict | None = None,
 
     return {"width": width, "height": height, "length": length, "volume": volume,
             "palette_size": len(palette)}
+
+
+def _check_states(states, data_version, validate) -> None:
+    """Raise WriteError if any state is not a real block of the version being written."""
+    target = None
+    if validate is not False:
+        try:                                     # mcvoxel ships with requirements-synth.txt
+            from mcvoxel.vocab import TARGET_DATA_VERSION as target
+        except ImportError:
+            if validate:
+                raise WriteError("Validation needs mcvoxel (requirements-synth.txt).")
+            return
+    if not validate and (validate is False or data_version != target):
+        return
+    from mcvoxel.vocab import validate_state
+    version = target if data_version is None else int(data_version)
+    bad = []
+    for state in states:
+        try:
+            validate_state(state, version)
+        except ValueError as exc:
+            bad.append(str(exc))
+    if bad:
+        raise WriteError("{} blockstate(s) are not valid for DataVersion {}: {}".format(
+            len(bad), version, "; ".join(bad[:5])))
 
 
 def _metadata(metadata, Compound, String, Int):

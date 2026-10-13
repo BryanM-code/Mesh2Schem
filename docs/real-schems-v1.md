@@ -28,6 +28,9 @@ data/real-schems-v1/
   index.json                one row per manifest entry
   near_duplicates.json      metadata near-duplicate candidates and review lists
   splits.json               seed, method, counts, creator links and groups, id -> split
+  normalized/               Phase 3: <id>.npz per build, records/<id>.json, index.json
+  vocab_coverage.json       Phase 3: vocabulary coverage (docs/vocab-coverage.md)
+  review/                   Phase 3: before/after crop sheets, interior cutaways, sheets.json
 ```
 
 The original collection folder is
@@ -137,6 +140,161 @@ in train; 5 of the 8 `incomplete_listing` builds are in test.
 The old `eval/real-eval-v1.json` stays on disk for its tests but is superseded by this
 split (D17, D19).
 
+## Normalization (Phase 3)
+
+```powershell
+.venv\Scripts\python -m schemset.normalize --dataset data/real-schems-v1 [--only <id> ...] [--workers 4] [--force] [--no-review]
+```
+
+Every non-excluded build (319) is read, cropped to the building, masked, measured and encoded
+as training targets. The run is resumable and deterministic:
+
+* A build is skipped when its record matches its source sha256, the pipeline version and the
+  vocabulary (version and table digest).
+* The npz files are byte-identical on a re-run. It never writes
+inside `source/`. A full run takes about 50 s with 4 workers.
+Code: `schemset/read.py`, `crop.py`, `interior.py`, `storey.py`, `coverage.py`, `review.py`,
+`normalize.py`. Vocabulary coverage has its own page: [vocab-coverage.md](vocab-coverage.md).
+
+### Outputs
+
+| File | Content |
+| --- | --- |
+| `normalized/<id>.npz` | `blocks` (uint16, X Y Z, Y up, +X east, +Z south), `palette` (blockstate strings, `palette[0]` = air), `shell` / `exterior` / `interior` (bool, an exact partition of the grid), `crop_offset` (source-grid coordinates of [0,0,0]), `ground_y` (ground level in this grid; at or below it is ground), `target_shape` (uint8) / `target_material` (uint16): the training targets in `mcvox-v3` |
+| `normalized/records/<id>.json` | everything measured for one build: read, validation, crop, masks, storey, supervised block counts per blockstate, `targets` (vocabulary version and digest, supervised and ignored counts, shape counts) |
+| `normalized/index.json` | per build: status (ok / failed + reason), validation, crop stats, flags, interior fraction, storey; plus a dataset summary |
+
+**Training targets** come from `mcvoxel.vocab.encode_target` (D20):
+
+* Exterior air is air.
+* Shell blocks the vocabulary holds get their (shape, material).
+* Everything else is IGNORE (shape 255, material 65535), never air: the interior, decor,
+  fluids, snow layers, unsupported blocks and door upper halves.
+
+1.68% of shell blocks are IGNORE (38,173): 33,977 outside the vocabulary and 4,196 door upper
+halves. Every non-IGNORE target pair is in `VALID`.
+
+### Reading and validation
+
+| | Result |
+| --- | --- |
+| Parsed | **319 / 319**, 0 failures |
+| Formats | legacy MCEdit 140, Sponge v2 83, Sponge v3 29, litematic v5 1 / v6 14 / v7 52 (all single-region in this dataset; multi-region is supported and tested) |
+| Dimensions vs index.json | 319 match exactly; 0 X/Z swaps; 0 mismatches |
+| Non-air count vs `non_air_blocks_from_metadata` | 178 match exactly; 141 have no metadata count; 0 mismatches |
+| Unknown legacy ids | 0 (they would be kept as solid `legacy:unknown_<id>` blocks and counted, never air) |
+| Non-minecraft namespaces | 0 |
+
+Reading details:
+- Litematics are read by our own nbtlib reader, because litemapy is GPL.
+- Legacy files are converted in memory with `schem_convert`'s steps.
+- Palettes are modernised:
+  - legacy aliases are folded
+  - 1.13 names are updated (`sign` → `oak_sign`, `grass_path` → `dirt_path`)
+  - `chain` → `iron_chain`, its 1.21.9 name (D21)
+  - `stone_slab` → `smooth_stone_slab` for files older than DataVersion 1901
+  - cave and void air become air
+- One Sponge v2 file has no DataVersion.
+- Only blocks are read; entities (paintings, item frames, armour stands) are not. The legacy
+  reader counts them: 58 legacy builds carry some.
+
+### Crop
+
+`schemset/crop.py` keeps the building and removes ground, landscape and site clutter. The
+approach differs from "largest connected mass" because the evidence said so:
+- Builders texture walls with gravel, suspicious gravel, snow blocks, tuff, coral blocks and
+  ores, so a block's name cannot say "landscape".
+- Paved roads and plazas are connected to the building, so connectivity alone would keep them.
+
+So roles are combined with position:
+1. Find the ground level from the open columns.
+2. Remove everything at or below it, except built blocks inside the footprint.
+3. Take the footprint with the rule of `mcvoxel.grid.remove_site`, measured from the ground:
+   columns of building material that rise at least 4 blocks, in masses at least 3 wide, plus
+   a 2-column margin.
+4. Outside the footprint, everything goes.
+5. Inside it, plants, turf and water stay only where they sit on the building (green roofs,
+   ivy, snow on a roof), not where they stand on open ground (hedges, lawns).
+6. Trees are recognised from logs touching leaves and are removed.
+
+The module docstring has every rule and threshold.
+
+| | Result |
+| --- | --- |
+| Non-air blocks removed, whole dataset | 8.0 M of 16.5 M (48%): rock 3.94 M, turf 2.62 M, plants/snow cover 0.62 M, built 0.59 M, water 0.14 M, trees 0.06 M, invisible 0.02 M |
+| Removed per build | median 22%; p25 7%, p75 50%, p90 70%, max 97% |
+| Ground level found | 282 builds (202 from natural open ground, 36 open ground, 44 under the building); 37 have no ground |
+| Built blocks kept below the ground | 253 builds (mostly floors set into the ground; also basements, foundations). Below-ground blocks are masked as ignored |
+| Largest side after the crop | median 54 blocks, p75 85, max 427 |
+
+### Interior mask
+
+`schemset/interior.py`:
+1. The ground level counts as solid, so a house whose floor was the grass plate does not flood
+   from below.
+2. Air is flooded from outside.
+3. `mcvoxel.grid.occluded_interior` (air covered from above and blocked on 4 of the other 5
+   axis directions) closes rooms leaked through open doorways.
+4. Exterior air is re-flooded through what remains.
+5. Shell = blocks touching exterior air; interior = the rest, which is ignored. Interior
+   blocks are never deleted.
+
+Interior fraction, i.e. interior / (interior + shell): median **0.86**, p10 0.78, p90 0.92,
+min 0.64. The 8 `incomplete_listing` (exterior-only) builds need no special handling: their
+interiors are ignored anyway (fractions 0.87–0.96).
+
+### Storey height (information only, D15)
+
+Nothing is filtered or rescaled on this (D15, revised 2026-10-12): buildings legitimately
+vary in scale, sometimes on purpose. `schemset/storey.py` measures floor-to-floor height:
+- Primary: floor planes inside the rooms. The ground counts as the first floor when the build
+  has none of its own.
+- Fallback: window-row spacing on the facade.
+- Each estimate carries a confidence; "unknown" when nothing plausible (3–12 blocks) is found.
+
+| Blocks per storey | high | medium | low | total |
+| ---: | ---: | ---: | ---: | ---: |
+| 3 | 4 | 2 | 5 | 11 |
+| 4 | 27 | 9 | 8 | 44 |
+| 5 | 33 | 9 | 17 | 59 |
+| 6 | 20 | 10 | 19 | 49 |
+| 7 | 10 | 2 | 20 | 32 |
+| 8 | 2 | 3 | 19 | 24 |
+| 9 | 3 | 1 | 13 | 17 |
+| 10 | 2 | 3 | 7 | 12 |
+| 11 | 1 | 1 | 7 | 9 |
+| 12 | 0 | 0 | 4 | 4 |
+| unknown | | | | 58 |
+
+Confidence: 102 high, 40 medium, 119 low (mostly one storey, measured floor to roof), 58
+unknown.
+
+### Flags added in Phase 3
+
+| Flag | Meaning | Builds |
+| --- | --- | ---: |
+| `crop_aggressive` | the crop removed more than 50% of non-air blocks. Usually a big terrain capture (11 of the 12 `oversized_capture` builds); review the sheets | 85 |
+| `multi_building` | more than one large separate mass remains (at least 15% of the biggest and 500 blocks): compounds, rows, campuses; all are kept | 18 |
+| `interior_leak_suspect` | exterior air under a roof and more than 3 blocks from open sky is at least 100 blocks and over 20% of (itself + interior air): open structures (canopies, verandas, an unfinished tower) or rooms that leaked | 17 |
+| `crop_kept_landscape` | plants, turf or water are over 10% of what the crop kept | 3 |
+| `crop_no_core` | no building column rises 4 blocks above the ground in a 3-wide mass; every building column was kept instead | 2 |
+
+Review renders (`review/sheets.json` lists what is where):
+- Before/after crop sheets: every `oversized_capture`, `multi_building` and `crop_aggressive`
+  build, plus 20 random others.
+- Interior cutaways (interior air drawn red): 5 leak suspects and 5 random builds.
+
+### Phase 3 limitations
+
+- **Landscape scenes keep landscape.** A cottage in a forest diorama (trees with plank
+  trunks), a lighthouse on a rock island, and houses on terraced slopes keep the rock under
+  their footprint. These are flagged and in the review sheets.
+- **Ambiguous interior.** Recessed porches and inner corners under eaves count as interior
+  (ignored); open-top towers count as exterior. This follows the axis-ray heuristic.
+- **Invisible blocks** (`light` 24.7k, `barrier`, `structure_void`) become air.
+- Phase 3 only measured vocabulary coverage. Vocabulary v3 (D20) followed; the v2 → v3
+  comparison is in [vocab-coverage.md](vocab-coverage.md).
+
 ## Known limitations
 
 From the collector (`source/REPORT.md`, `source/verification.json`) and this pass:
@@ -152,8 +310,8 @@ From the collector (`source/REPORT.md`, `source/verification.json`) and this pas
 - **Dimensions measure the selection**, not the building: terrain, water, roads, vehicles
   and props are often included (the lighthouse needs cropping; the hangar holds aircraft).
   Cropping and segmentation are Phase 3.
-- **Scale varies.** The hangar's creator describes it as 1.5:1; D15 records
-  blocks-per-storey per build rather than rescaling.
+- **Scale varies.** The hangar's creator describes it as 1.5:1. D15 has no scale rule:
+  nothing is rescaled or filtered, and blocks-per-storey is recorded as information only.
 - **Formats.** 142 legacy `.schematic` files need ID conversion and 67 `.litematic` files
   need a reader (Phase 3).
 - **Geometric duplicates untested**: rotations, crops, cross-format copies and minor
