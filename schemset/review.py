@@ -1,4 +1,4 @@
-"""Review renders: before/after crop contact sheets and interior-mask cutaways.
+"""Review renders: voxel images (used by `schemset.gallery`), contact sheets and cutaways.
 
 Drawn with the Library's own voxel renderer (`thumbs._render_orbit`), so a build looks the
 same here as on its Inspect page. Best effort: a build that cannot be drawn gets an empty

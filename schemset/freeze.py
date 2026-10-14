@@ -12,7 +12,16 @@ Phase 2 of docs/mesh-to-schem-plan.md (version 4). Writes, under --out:
     index.json                one row per manifest entry: pass-through fields, creator_norm,
                               licence_tier (D14), flags, split
     near_duplicates.json      metadata-only near-duplicate candidates, each with its reason
-    splits.json               creator-grouped train / val / test split (D17), seed and method
+    splits.json               creator-grouped train / val / test split (D17), seed and method,
+                              and the decisions applied after it (`overrides`)
+
+Two decisions are applied on top of the seeded split, so no other build moves:
+
+*   D24: builds set aside by decision (`SET_ASIDE`) get split "excluded" and their reason as a
+    flag.
+*   Geometric duplicates (`schemset.dedupe` -> `geometric_duplicates.json`, read here when
+    present): a duplicate pair in two different splits is put into one by moving the smaller
+    creator group, whole, into the other's split. Both builds get `geometric_duplicate`.
 
 The copy goes to `source.partial/` first and becomes `source/` only after every check
 passes: each line of the dataset's own checksums.sha256, each manifest sha256, and every
@@ -65,7 +74,15 @@ PASS_THROUGH = (
     "listing_completion_percent", "source_url", "build_name",
 )
 FLAGS = ("tier_x", "incomplete_listing", "oversized_capture", "legacy_format",
-         "near_dup_candidate")
+         "near_dup_candidate", "excluded_landscape_diorama", "geometric_duplicate")
+
+# D24 (2026-10-12): landscape dioramas set aside -- the building is a small part of a
+# modelled landscape, so the crop cannot make a clean training target of it.
+SET_ASIDE = {
+    "pmc-traditional-house-cottage-style": "excluded_landscape_diorama",   # forest + road
+    "pmc-the-lighthouse-5778696": "excluded_landscape_diorama",            # rock island
+}
+GEOMETRIC_DUPLICATES = "geometric_duplicates.json"
 OVERSIZED_XZ = 200            # X or Z above this: a capture to crop in Phase 3
 
 # Near-duplicate rules (metadata only; schematics are not parsed in this phase).
@@ -609,6 +626,8 @@ def derive(out: Path, seed: int = SEED) -> dict:
         r["split"] = assignment[r["id"]]
         r["creator_group"] = group_of.get(r["id"])
 
+    overrides = apply_overrides(rows, groups, out / GEOMETRIC_DUPLICATES)
+
     counts = split_counts(rows)
     index = {"dataset": DATASET, "rows_count": len(rows),
              "tier_mapping": TIER_BY_LICENCE, "flags": list(FLAGS),
@@ -626,12 +645,62 @@ def derive(out: Path, seed: int = SEED) -> dict:
         "creator_links": links,
         "creator_notes": creator_notes(rows, entries_by_id),
         "groups": groups,
+        "overrides": overrides,
         "assignments": {r["id"]: r["split"] for r in rows},
     }
     _write_json(out / "index.json", index)
     _write_json(out / "near_duplicates.json", near)
     _write_json(out / "splits.json", splits)
     return {"rows": rows, "near": near, "splits": splits}
+
+
+def apply_overrides(rows: list[dict], groups: list[dict], duplicates: Path) -> dict:
+    """D24 set-asides, then geometric-duplicate moves (see the module docstring)."""
+    by_id = {r["id"]: r for r in rows}
+    set_aside = []
+    for bid, flag in sorted(SET_ASIDE.items()):
+        if bid in by_id:
+            r = by_id[bid]
+            set_aside.append({"id": bid, "from": r["split"], "flag": flag})
+            r["split"] = "excluded"
+            if flag not in r["flags"]:
+                r["flags"].append(flag)
+    moves = []
+    if duplicates.is_file():
+        pairs = [p["ids"] for p in json.loads(duplicates.read_text(encoding="utf-8"))["pairs"]
+                 if p.get("verdict") == "duplicate" and all(i in by_id for i in p["ids"])]
+        for a, b in pairs:
+            for i in (a, b):
+                if "geometric_duplicate" not in by_id[i]["flags"]:
+                    by_id[i]["flags"].append("geometric_duplicate")
+        members = collections.defaultdict(list)
+        for r in rows:
+            if r["split"] != "excluded":
+                members[r["creator_group"]].append(r)
+        uf = _UnionFind()
+        for a, b in pairs:
+            ga, gb = by_id[a]["creator_group"], by_id[b]["creator_group"]
+            if ga and gb and "excluded" not in (by_id[a]["split"], by_id[b]["split"]):
+                uf.union(ga, gb)
+        for root, keys in sorted(uf.groups().items()):
+            splits = {members[k][0]["split"] for k in keys}
+            if len(keys) < 2 or len(splits) < 2:
+                continue
+            target_key = max(sorted(keys), key=lambda k: len(members[k]))
+            target = members[target_key][0]["split"]
+            for k in sorted(keys):
+                if members[k][0]["split"] != target:
+                    ids = sorted(r["id"] for r in members[k])
+                    moves.append({"creator_group": k, "ids": ids,
+                                  "from": members[k][0]["split"], "to": target,
+                                  "reason": "geometric duplicate of a build in creator group "
+                                            f"'{target_key}'"})
+                    for r in members[k]:
+                        r["split"] = target
+    for g in groups:
+        kept = sorted({by_id[i]["split"] for i in g["ids"]} - {"excluded"})
+        g["split"] = kept[0] if kept else "excluded"
+    return {"set_aside_d24": set_aside, "duplicate_moves": moves}
 
 
 def _write_json(path: Path, data) -> None:

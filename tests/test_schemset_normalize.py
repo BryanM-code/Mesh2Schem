@@ -305,8 +305,7 @@ class InteriorTests(unittest.TestCase):
         from schemset.crop import crop_build
         from schemset.interior import compute_masks
         result = crop_build(build_of(house(plate(), 10, 10, door=door), PALETTE))
-        ground = result.stats["ground_level"] - result.offset[1]
-        return result, compute_masks(result.blocks, ground)
+        return result, compute_masks(result.blocks, result.ground)
 
     def test_hollow_box(self):
         result, m = self.masks(door=False)
@@ -319,9 +318,9 @@ class InteriorTests(unittest.TestCase):
     def test_doorway_does_not_leak_the_room(self):
         _, closed = self.masks(door=False)
         result, m = self.masks(door=True)
-        self.assertGreater(m.stats["leaked_rooms"], 0)          # the first flood got in
+        # A 1-wide doorway: only the doorway itself is exterior (a reveal), the room is not.
         self.assertGreaterEqual(m.stats["interior_air"], 0.9 * closed.stats["interior_air"])
-        self.assertNotIn("interior_leak_suspect", m.flags)
+        self.assertNotIn("large_opening", m.flags)
         # interior blocks are masked, never deleted
         self.assertEqual(int((result.blocks != 0).sum()),
                          int(((result.blocks != 0) & (m.shell | m.interior)).sum()))
@@ -340,7 +339,7 @@ class StoreyTests(unittest.TestCase):
             g[8, y, 8:17] = g[16, y, 8:17] = PLANKS
             g[8:17, y, 8] = g[8:17, y, 16] = PLANKS
         result = crop_build(build_of(g, PALETTE))
-        m = compute_masks(result.blocks, result.stats["ground_level"] - result.offset[1])
+        m = compute_masks(result.blocks, result.ground)
         est = estimate(result.blocks, result.palette, m, m.stats["ground_y"])
         self.assertEqual(est["blocks_per_storey"], 4)
         self.assertEqual(est["confidence"], "high")
@@ -425,8 +424,8 @@ class NormalizeTests(TempCase):
         self.assertEqual(index["summary"]["validation"]["unknown_legacy"], {"b1": {"700:0": 1}})
         with np.load(ds / "normalized" / "b0.npz") as z:
             self.assertEqual(set(z.files), {"blocks", "palette", "shell", "exterior",
-                                            "interior", "crop_offset", "ground_y",
-                                            "target_shape", "target_material"})
+                                            "interior", "crop_offset", "ground_height",
+                                            "ground_y", "target_shape", "target_material"})
             self.assertEqual(list(z["crop_offset"]), [8, 0, 8])
             from mcvoxel import vocab
             shape, mat = z["target_shape"], z["target_material"]

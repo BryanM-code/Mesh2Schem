@@ -7,8 +7,10 @@ Usage:  python -m schemset.normalize --dataset data/real-schems-v1
 For every index row except split "excluded" (tier X):
 
     read      `schemset.read`: any format -> palette grid, validated against index.json
-    crop      `schemset.crop`: ground, landscape and site removed, padded with air
-    masks     `schemset.interior`: shell / exterior / interior (ignored, not deleted)
+    crop      `schemset.crop`: natural terrain, trees and site structures removed, ground
+              height per column, padded with air (D23)
+    masks     `schemset.interior`: shell / exterior / interior by opening size (D22;
+              ignored, not deleted), plus the visibility audit
     storey    `schemset.storey`: blocks per storey + confidence (information only, D15)
     targets   `mcvoxel.vocab.encode_target`: (shape, material) training targets in the
               current vocabulary -- exterior air, shell blocks the vocabulary holds, and
@@ -19,14 +21,18 @@ Writes, all under `<dataset>/` and never inside `source/`:
 
     normalized/<id>.npz           blocks (uint16 X, Y, Z), palette, shell, exterior, interior
                                   (bool), crop_offset (source-grid coordinates of [0,0,0]),
-                                  ground_y (this grid's ground level; at or below is ground),
-                                  target_shape (uint8) / target_material (uint16) in the
-                                  vocabulary named by the record's `vocab_version`
+                                  ground_height (int16 X, Z: the ground height of each
+                                  column in this grid, at or below is ground, -1 none),
+                                  ground_y (its median, -1 none), target_shape (uint8) /
+                                  target_material (uint16) in the vocabulary named by the
+                                  record's `vocab_version`
     normalized/records/<id>.json  everything measured for one build
     normalized/index.json         per build: status (ok / failed + reason), validation, crop
                                   stats, flags, interior fraction, storey; plus a summary
+    normalized/previous_run.json  the previous pipeline version's per-build numbers, kept
+                                  when VERSION changes (for "changed vs previous run")
     vocab_coverage.json           `schemset.coverage` over every ok build
-    review/                       before/after crop contact sheets and interior cutaways
+    review/gallery_v2/            `schemset.gallery`: one card per build, before / after
 
 Resumable: a build whose record has the same source sha256, pipeline VERSION, vocabulary
 version and vocabulary digest (`vocab_digest`, over the tables), and whose npz exists, is
@@ -42,7 +48,6 @@ import hashlib
 import io
 import json
 import os
-import random
 import sys
 import traceback
 import zipfile
@@ -51,11 +56,8 @@ from pathlib import Path
 
 import numpy as np
 
-VERSION = "normalize-2"             # 2: iron_chain rename in the reader; v3 targets in the npz
-SEED = 20261011
-REVIEW_RANDOM = 20
-REVIEW_INTERIOR = 10
-SHEET_BUILDS = 8
+VERSION = "normalize-3"             # 3: Phase 3 fixes -- D22 opening-size interior, D23
+                                    #    terrain and per-column ground, site lines, trees
 
 
 # --------------------------------------------------------------------------- per build
@@ -88,7 +90,7 @@ def fingerprint(row: dict) -> str:
 
 def process(row: dict, dataset: str) -> dict:
     """Normalize one build; never raises (a failure is a record with a reason)."""
-    from .crop import crop_build
+    from .crop import crop_build, floor_under_rooms
     from .interior import compute_masks
     from .read import ReadError, load_build, validate
     from .storey import estimate
@@ -112,11 +114,13 @@ def process(row: dict, dataset: str) -> dict:
         rec["validation"] = validate(build, row)
 
         crop = crop_build(build)
-        rec["crop"] = {**crop.stats, "offset": list(crop.offset), "flags": crop.flags}
         if "crop_empty" in crop.flags:
+            rec["crop"] = {**crop.stats, "offset": list(crop.offset), "flags": crop.flags}
             return {**rec, "status": "failed", "reason": "crop: no block survived the crop"}
-        g = crop.stats["ground_level"]
-        masks = compute_masks(crop.blocks, None if g is None else g - crop.offset[1])
+        masks = compute_masks(crop.blocks, crop.ground)
+        if floor_under_rooms(build, crop, masks.interior):      # updates crop.stats too
+            masks = compute_masks(crop.blocks, crop.ground)     # same masks; stats see the floor
+        rec["crop"] = {**crop.stats, "offset": list(crop.offset), "flags": crop.flags}
         rec["masks"] = {**masks.stats, "flags": masks.flags}
         rec["storey"] = estimate(crop.blocks, crop.palette, masks, masks.stats["ground_y"])
 
@@ -140,6 +144,7 @@ def process(row: dict, dataset: str) -> dict:
             "palette": np.array(crop.palette, dtype=str),
             "shell": masks.shell, "exterior": masks.exterior, "interior": masks.interior,
             "crop_offset": np.array(crop.offset, dtype=np.int32),
+            "ground_height": crop.ground.astype(np.int16),
             "ground_y": np.array(masks.stats["ground_y"], dtype=np.int32),
             "target_shape": t_shape, "target_material": t_mat,
         })
@@ -195,10 +200,15 @@ def index_entry(rec: dict) -> dict:
         c = rec["crop"]
         entry["crop"] = {k: c[k] for k in ("ground_level", "ground_method", "bbox_before",
                                            "bbox_after", "dims_after", "removed_fraction",
-                                           "removed_built_above_ground", "large_masses",
-                                           "offset") if k in c}
+                                           "removed_landscape", "removed_site",
+                                           "removed_lines", "removed_built_above_ground",
+                                           "large_masses", "offset") if k in c}
     if "masks" in rec:
-        entry["interior_fraction"] = rec["masks"]["interior_fraction"]
+        m = rec["masks"]
+        entry["interior_fraction"] = m["interior_fraction"]
+        entry["exposure"] = {k: m.get(k) for k in ("shell", "visible_ignored_fraction",
+                                                   "below_ground_fraction",
+                                                   "covered_exterior_share")}
     if "storey" in rec:
         s = rec["storey"]
         entry["storey"] = {"blocks_per_storey": s["blocks_per_storey"],
@@ -237,6 +247,9 @@ def summarize(records: list[dict]) -> dict:
         "crop": {"removed_fraction": _quantiles([r["crop"]["removed_fraction"] for r in ok]),
                  "ground_method": dict(collections.Counter(r["crop"]["ground_method"] for r in ok))},
         "interior_fraction": _quantiles([r["masks"]["interior_fraction"] for r in ok]),
+        "visible_ignored_fraction": _quantiles([r["masks"]["visible_ignored_fraction"]
+                                                for r in ok]),
+        "below_ground_fraction": _quantiles([r["masks"]["below_ground_fraction"] for r in ok]),
         "storey_histogram": dict(sorted(storeys.items())),
         "storey_confidence": dict(sorted(confidence.items())),
         "targets": {"vocab_version": sorted({t["vocab_version"] for t in targets}),
@@ -246,76 +259,44 @@ def summarize(records: list[dict]) -> dict:
     }
 
 
-# --------------------------------------------------------------------------- review
+# --------------------------------------------------------------------------- previous run
 
-def write_review(dataset: Path, records: list[dict]) -> dict:
-    from .read import load_build
-    from . import review
+def previous_metrics(norm: Path, rec: dict) -> dict | None:
+    """The numbers a later run is compared with, from one record and its npz."""
+    from .interior import exposure
+    if rec.get("status") != "ok" or not (norm / rec.get("npz", "")).is_file():
+        return None
+    with np.load(norm / rec["npz"]) as z:
+        solid = z["blocks"] != 0
+        height = z["ground_height"] if "ground_height" in z.files else int(z["ground_y"])
+        audit, _ = exposure(solid, z["shell"], z["exterior"], height)
+        shell = int(z["shell"].sum())
+    return {"split": rec.get("split"), "removed_fraction": rec["crop"]["removed_fraction"],
+            "non_air_after": rec["crop"]["non_air_after"], "shell": shell,
+            "interior_fraction": rec["masks"]["interior_fraction"],
+            "visible_ignored_fraction": audit["visible_ignored_fraction"],
+            "below_ground_fraction": audit["below_ground_fraction"], "flags": rec.get("flags", [])}
 
-    ok = {r["id"]: r for r in records if r.get("status") == "ok"}
-    groups = {name: sorted(i for i, r in ok.items() if name in r["flags"])
-              for name in ("oversized_capture", "multi_building", "crop_aggressive")}
-    flagged = set().union(*groups.values())
-    others = sorted(set(ok) - flagged)
-    groups["random"] = sorted(random.Random(SEED).sample(others, min(REVIEW_RANDOM, len(others))))
 
-    cache = {}
-
-    def panels(bid):
-        if bid not in cache:
-            rec = ok[bid]
-            build = load_build(dataset / "source" / rec["file"])
-            with np.load(dataset / "normalized" / rec["npz"]) as z:
-                after = review.render(z["blocks"], list(z["palette"]))
-            cache[bid] = [review.render(build.blocks, build.palette), after]
-        return cache[bid]
-
-    def caption(bid):
-        r = ok[bid]
-        c = r["crop"]
-        return (f"{bid[:60]}\nremoved {100 * c['removed_fraction']:.0f}%  ground "
-                f"{c['ground_level']} ({c['ground_method']})  masses {c['masses'][:3]}\n"
-                + " ".join(f for f in r["flags"] if f not in ("legacy_format",)))
-
-    out_dir = dataset / "review"
-    old = out_dir / "sheets.json"                 # this step's own previous output only
-    if old.is_file():
-        for name in json.loads(old.read_text(encoding="utf-8")):
-            (out_dir / name).unlink(missing_ok=True)
-    sheets = {}
-    for name, ids in groups.items():
-        prefix = name if name.startswith("crop_") else f"crop_{name}"
-        for k in range(0, len(ids), SHEET_BUILDS):
-            chunk = ids[k:k + SHEET_BUILDS]
-            path = out_dir / f"{prefix}_{k // SHEET_BUILDS + 1:02d}.png"
-            review.contact_sheet([{"caption": caption(i), "panels": panels(i)} for i in chunk],
-                                 path)
-            sheets[path.name] = chunk
-
-    suspects = sorted(i for i, r in ok.items() if "interior_leak_suspect" in r["flags"])
-    pick = suspects[:REVIEW_INTERIOR // 2]
-    rest = sorted(set(ok) - set(pick))
-    pick += random.Random(SEED + 1).sample(rest, min(REVIEW_INTERIOR - len(pick), len(rest)))
-    items = []
-    for bid in sorted(pick):
-        with np.load(dataset / "normalized" / ok[bid]["npz"]) as z:
-            blocks, palette = z["blocks"], list(z["palette"])
-            interior, gy = z["interior"], int(z["ground_y"])
-        ys = np.flatnonzero((blocks != 0).any(axis=(0, 2)))
-        lo, hi = max(int(ys[0]), gy + 1), int(ys[-1])
-        cuts = [lo + max(2, (hi - lo) // 5), lo + (hi - lo) // 2]
-        m = ok[bid]["masks"]
-        items.append({"caption": f"{bid[:60]}\ninterior {m['interior_fraction']:.2f}  "
-                                 f"deep roofed exterior {m['deep_covered_exterior']}  cuts {cuts}\n"
-                                 + " ".join(m["flags"]),
-                      "panels": [review.render(blocks, palette)]
-                      + [review.interior_view(blocks, palette, interior, c, gy) for c in cuts]})
-    for k in range(0, len(items), 5):
-        path = out_dir / f"interior_{k // 5 + 1:02d}.png"
-        review.contact_sheet(items[k:k + 5], path, columns=1)
-        sheets[path.name] = sorted(pick)[k:k + 5]
-    _write_json(out_dir / "sheets.json", sheets)
-    return sheets
+def snapshot_previous(norm: Path) -> Path | None:
+    """Keep the previous pipeline version's per-build numbers before a new version rebuilds
+    them (`previous_run.json`), so a review can sort by what changed."""
+    index_path = norm / "index.json"
+    if not index_path.is_file():
+        return None
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    if index.get("version") == VERSION:
+        return None
+    builds = {}
+    for b in index["builds"]:
+        path = norm / "records" / f"{b['id']}.json"
+        if path.is_file():
+            m = previous_metrics(norm, json.loads(path.read_text(encoding="utf-8")))
+            if m:
+                builds[b["id"]] = m
+    out = norm / "previous_run.json"
+    _write_json(out, {"version": index.get("version"), "builds": builds})
+    return out
 
 
 # --------------------------------------------------------------------------- CLI
@@ -336,8 +317,19 @@ def main(argv=None) -> int:
     if norm.resolve().is_relative_to((dataset / "source").resolve()):
         raise SystemExit("refusing to write inside source/")
     (norm / "records").mkdir(parents=True, exist_ok=True)
-    rows = [r for r in json.loads((dataset / "index.json").read_text(encoding="utf-8"))["rows"]
-            if r["split"] != "excluded"]
+    all_rows = json.loads((dataset / "index.json").read_text(encoding="utf-8"))["rows"]
+    rows = [r for r in all_rows if r["split"] != "excluded"]
+    previous = snapshot_previous(norm)
+    if previous:
+        print(f"previous version's numbers kept in {previous}")
+    # Builds now excluded (D24, tier X): their derived outputs go; the source never changes.
+    live = {r["id"] for r in rows}
+    for r in all_rows:
+        if r["id"] not in live:
+            for stale in (norm / "records" / f"{r['id']}.json", norm / f"{r['id']}.npz"):
+                if stale.is_file():
+                    stale.unlink()
+                    print(f"  removed derived output of excluded build: {stale.name}")
     if args.only:
         unknown = set(args.only) - {r["id"] for r in rows}
         if unknown:
@@ -362,9 +354,21 @@ def main(argv=None) -> int:
     records = []
     for r in rows:
         path = norm / "records" / f"{r['id']}.json"
-        records.append(json.loads(path.read_text(encoding="utf-8")) if path.is_file()
-                       else {"id": r["id"], "split": r["split"], "licence_tier": r["licence_tier"],
-                             "building_category": r["building_category"], "status": "pending"})
+        if not path.is_file():
+            records.append({"id": r["id"], "split": r["split"], "licence_tier": r["licence_tier"],
+                            "building_category": r["building_category"], "status": "pending"})
+            continue
+        rec = json.loads(path.read_text(encoding="utf-8"))
+        # Splits and dataset flags can change without the build changing (duplicate moves).
+        fresh = {"split": r["split"], "licence_tier": r["licence_tier"],
+                 "building_category": r["building_category"]}
+        if rec.get("status") == "ok":
+            fresh["flags"] = sorted(set(r["flags"]) | set(rec["crop"]["flags"])
+                                    | set(rec["masks"]["flags"]))
+        if any(rec.get(k) != v for k, v in fresh.items()):
+            rec.update(fresh)
+            _write_json(path, rec)
+        records.append(rec)
     summary = summarize(records)
     _write_json(norm / "index.json", {"dataset": dataset.name, "version": VERSION,
                                       "summary": summary,
@@ -375,8 +379,9 @@ def main(argv=None) -> int:
     _write_json(dataset / "vocab_coverage.json", coverage)
 
     if not args.no_review:
-        sheets = write_review(dataset, records)
-        print(f"review: {len(sheets)} sheets in {dataset / 'review'}")
+        from .gallery import build_gallery
+        page = build_gallery(dataset, workers=args.workers)
+        print(f"review gallery: {page}")
     print(f"ok {summary['ok']}, failed {summary['failed']}, pending "
           f"{summary['builds'] - summary['ok'] - summary['failed']}")
     print(f"  {coverage['vocab_version']}: representable {coverage['v3']['representable']}% "
