@@ -178,7 +178,7 @@ Vocabulary coverage has its own page: [vocab-coverage.md](vocab-coverage.md).
 * Everything else is IGNORE (shape 255, material 65535), never air: the interior, decor,
   fluids, snow layers, unsupported blocks and door upper halves.
 
-1.75% of shell blocks are IGNORE (57,316): 50,935 outside the vocabulary and 6,381 door upper
+1.71% of shell blocks are IGNORE (46,691): 40,659 outside the vocabulary and 6,032 door upper
 halves. Every non-IGNORE target pair is in `VALID`.
 
 ### Reading and validation
@@ -260,7 +260,7 @@ cheaper than a hole in a building. The module docstring has every rule and thres
 | Non-air blocks removed | 4.61 M of 13.39 M (34.5%). By role (before 35k blocks were restored as terrain floors): turf 2.15 M, natural minerals 1.61 M, plants and snow cover 0.51 M, built (site) 0.27 M, trees 0.04 M, water 0.04 M, invisible 0.02 M |
 | Removed per build | median 17%; p25 1%, p75 45%, p90 65%, max 97% |
 | Ground | natural terrain in 185 builds; none (virtual plane) in 128; `ground_fallback` in 4 |
-| Terrain floors restored | 130 builds, 35,385 blocks |
+| Terrain floors restored | 136 builds, 78,802 blocks (normalize-4) |
 | Kept blocks below the ground | in 76 builds; below-ground ignored per build: p90 1.3%, max 14.4% |
 | Largest side after the crop | median 57 blocks, p75 87, max 350 |
 
@@ -279,19 +279,27 @@ never makes air interior on its own.
 4. A leftover pocket in which at least 75% of the voxels see the outside along a straight
    horizontal line is an open gap, not a room, and is exterior. An example is the strip
    between a garden wall and the house under the eaves.
-5. Shell is every block touching exterior air; interior is the rest, which is ignored and
+5. **Depth under cover** (D22 amended, 2026-10-14). Exterior air more than 6 steps from
+   uncovered exterior air becomes interior. Steps are 6-connected and go through exterior
+   air only; uncovered air has no block anywhere above it in its column, and the grid's
+   boundary counts as uncovered. See [Depth cap under cover](#depth-cap-under-cover-d22-amended-2026-10-14).
+6. Shell is every block touching exterior air; interior is the rest, which is ignored and
    never deleted.
 
-A room behind a doorway or window up to 2 wide stays interior, with or without glass.
-`large_opening` flags builds where more than 30% of the *deep* covered air ends up exterior:
-open halls, garages, wide arches, hollow facade shells. Deep covered air means air more than
-3 blocks in from open sky; eaves and porches would otherwise flag most houses.
+A room behind a doorway or window up to 2 wide stays interior, with or without glass. Being
+covered still never makes air interior on its own; only depth under cover does.
 
-| | Result |
+`large_opening` flags builds where more than 30% of the *deep* covered air ends up exterior.
+Deep covered air means air more than 3 blocks in from open sky; eaves and porches would
+otherwise flag most houses. `deep_cover_capped` flags builds where the depth cap turned more
+than 200 air voxels interior; the count is `deep_cover_capped` in the record's mask stats.
+
+| | Result (normalize-4) |
 | --- | --- |
-| Interior fraction (interior / (interior + shell)) | median 0.81, p10 0.66, p90 0.88, min 0.30 |
-| Outside-visible but ignored (see below) | median 0.2%, p90 3.2%, max 18.6% |
-| `large_opening` | 69 builds |
+| Interior fraction (interior / (interior + shell)) | median 0.83, p10 0.74, p90 0.90, min 0.30 |
+| Outside-visible but ignored (see below) | median 0.1%, p90 2.1%, max 14.2% |
+| `large_opening` | 11 builds |
+| `deep_cover_capped` | 108 builds; 3.12 M air voxels turned interior |
 
 ### Phase 3 fixes: before and after (2026-10-12)
 
@@ -329,6 +337,108 @@ ignored, as a share of kept blocks.
 Per-build tables, for the 17 builds named in the review and every build whose removed share
 moved by more than 10 points or whose shell changed by more than 10% (256 builds), are in
 [phase3-fixes.md](phase3-fixes.md).
+
+### Depth cap under cover (D22 amended, 2026-10-14)
+
+The opening rule overshot on open halls, hollow facade shells and open ground floors: the
+outside flooded all the way in, so internal blocks were trained as facade. In the baroque
+townhouse, for example, the diagonal support beams inside the shell were shell. The cap
+keeps covered exterior air only within `COVER_DEPTH` steps of uncovered exterior air.
+
+The audit (`interior.exposure`) uses the same cap: open covered air counts as outside-visible
+only within `COVER_DEPTH` steps (through above-ground air) of uncovered air. Otherwise deep
+halls would inflate visible-but-ignored.
+
+**Choosing the depth.** Each depth was run on the whole dataset (crop unchanged):
+
+| | No cap (normalize-3) | Depth 3 | Depth 4 | Depth 5 | **Depth 6** | Depth 8 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Supervised (shell) blocks | 3,270,234 | 2,608,035 | 2,673,361 | 2,709,740 | **2,734,544** | 2,775,708 |
+| Interior fraction p0 / p10 / p50 | 0.30 / 0.66 / 0.81 | 0.53 / 0.76 / 0.84 | 0.36 / 0.75 / 0.83 | 0.30 / 0.74 / 0.83 | **0.30 / 0.74 / 0.83** | 0.30 / 0.73 / 0.83 |
+| `large_opening` | 69 | 0 | 3 | 6 | **11** | 19 |
+| Visible but ignored p50 / p90 / max | 0.2 / 3.2 / 18.6% | 0.0 / 1.2 / 11.8% | 0.1 / 1.7 / 11.5% | 0.1 / 1.9 / 13.0% | **0.1 / 2.1 / 14.2%** | 0.1 / 2.5 / 16.5% |
+| Builds over 200 voxels capped | – | 153 | 129 | 118 | **108** | 94 |
+| Air turned interior by the cap | – | 3.47 M | 3.32 M | 3.21 M | **3.12 M** | 2.97 M |
+
+Porch set, visible but ignored (%), with the capped audit:
+
+| Build | No cap | 3 | 4 | 5 | **6** | 8 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| ab-6057 | 0.1 | 0.0 | 0.0 | 0.0 | **0.1** | 0.1 |
+| pmc-triple-gable-tudor-townhouse-6884362 | 0.1 | 0.1 | 0.3 | 0.3 | **0.3** | 0.1 |
+| pmc-cape-cod-house---furnished | 13.2 | 2.8 | 3.6 | 5.1 | **6.7** | 9.0 |
+| pmc-small-craftsman-house---exterior-amp-landscape-only | 0.0 | 0.0 | 0.0 | 0.0 | **0.0** | 0.0 |
+| pmc-victorian-queen-anne-style---carson-mansion | 0.1 | 0.0 | 0.0 | 0.0 | **0.0** | 0.1 |
+| pmc-spanish-colonial-house---philippines | 0.2 | 0.1 | 0.2 | 0.2 | **0.2** | 0.2 |
+| pmc-greek-revival-plantation-house | 0.7 | 0.0 | 0.0 | 0.1 | **0.1** | 0.2 |
+
+The same, with the audit left uncapped (what a straight line of sight from outside reaches,
+whatever the depth):
+
+| Build | No cap | 3 | 4 | 5 | **6** | 8 | What the cap removes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| ab-6057 | 0.1 | 5.2 | 4.6 | 4.1 | **3.6** | 2.7 | a 2-tall crawl space under the whole hotel |
+| pmc-triple-gable-tudor-townhouse-6884362 | 0.1 | 2.4 | 1.7 | 1.5 | **1.2** | 0.1 | an open ground-floor hall behind the courtyard arcade, 7–9 steps in |
+| pmc-cape-cod-house---furnished | 13.2 | 17.6 | 13.4 | 13.2 | **13.2** | 13.2 | nothing from depth 5 on |
+| pmc-small-craftsman-house---exterior-amp-landscape-only | 0.0 | 11.7 | 11.2 | 10.6 | **10.0** | 8.9 | 1 × 1 channels under the raised floor |
+| pmc-victorian-queen-anne-style---carson-mansion | 0.1 | 3.2 | 1.7 | 1.2 | **0.7** | 0.1 | a ground-level veranda (16 × 17) at depth 4; small corners at 6 |
+| pmc-spanish-colonial-house---philippines | 0.2 | 1.1 | 0.7 | 0.2 | **0.2** | 0.2 | nothing from depth 5 on |
+| pmc-greek-revival-plantation-house | 0.7 | 21.8 | 18.8 | 15.7 | **12.4** | 7.4 | halls behind big openings (it was `large_opening`) |
+
+Hollow / hall set, interior fraction:
+
+| Build | No cap | 3 | 4 | 5 | **6** | 8 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| pmc-baroque-townhouse | 0.31 | 0.86 | 0.85 | 0.85 | **0.85** | 0.85 |
+| pmc-brick-tenement-house | 0.30 | 0.56 | 0.36 | 0.30 | **0.30** | 0.30 |
+| pmc-old-tenement-house | 0.39 | 0.80 | 0.80 | 0.80 | **0.79** | 0.78 |
+| pmc-adelaide-hotel-toronto | 0.43 | 0.89 | 0.89 | 0.89 | **0.89** | 0.88 |
+| pmc-warehouse-factory-hall | 0.44 | 0.88 | 0.87 | 0.87 | **0.87** | 0.87 |
+| pmc-aircraft-hangar-private-jet-hangar-1-5-1-scale-1-1-scale-adaptable-full-interiors | 0.45 | 0.90 | 0.89 | 0.89 | **0.89** | 0.89 |
+| ab-13526 | 0.48 | 0.88 | 0.87 | 0.86 | **0.85** | 0.83 |
+
+**Choice: `COVER_DEPTH` = 6.**
+- Taken literally, the rule "the smallest depth that keeps every porch-set build within
+  +1 point of its visible-but-ignored %" picks 3: every porch build passes in the capped
+  table.
+- But the capped audit cannot see what the cap removes. Air the cap turns interior stops
+  counting as visible in the same step, so the criterion cannot fail at any depth.
+- The uncapped audit shows what each depth actually takes. Every loss was located:
+  - Crawl spaces under the hotel and the craftsman house, the Tudor's open hall and the
+    Greek Revival's halls are not porches; capping them is the point.
+  - The one real porch loss is the Victorian's ground-level veranda. It is within +1 point
+    only from depth 6 (+0.6; depth 5 is +1.1).
+- The Spanish colonial and the Cape Cod lose nothing from depth 5.
+- Depth 6 is therefore the smallest depth that keeps every porch, veranda and loggia in the
+  set. The hall set is at 0.79–0.89 interior from depth 3 to 8 (except the brick tenement,
+  below), so a deeper cap would buy nothing there.
+
+**Before → after** (normalize-3 → normalize-4, 317 builds):
+
+| | normalize-3 | normalize-4 |
+| --- | ---: | ---: |
+| Supervised (shell) blocks | 3,270,234 | 2,734,555 (-16%) |
+| Interior fraction p0 / p10 / p50 | 0.30 / 0.66 / 0.81 | 0.30 / 0.74 / 0.83 |
+| Visible but ignored p50 / p90 / max | 0.2 / 3.2 / 18.6% | 0.1 / 2.1 / 14.2% |
+| Builds visible-but-ignored over 10% | 6 | 4 |
+| `large_opening` | 69 | 11 |
+| `deep_cover_capped` | – | 108 |
+| Builds whose shell changed by more than 5% | | 100 |
+| Terrain floors restored (step 7 of the crop: more hall air is interior now) | 130 builds, 35,385 blocks | 136 builds, 78,802 blocks |
+| v3 coverage, representable | 98.44% | 98.51% |
+
+- The hall set: baroque townhouse 0.31 → 0.85, old tenement 0.39 → 0.79, Adelaide hotel
+  0.43 → 0.89, factory hall 0.44 → 0.87, hangar 0.45 → 0.89, ab-13526 0.48 → 0.85.
+- The brick tenement stays at 0.30. The hollow behind its facade has no roof, so it is open
+  sky and the cap rightly does not apply.
+- The porch set: visible but ignored stays within +0.2 points (the Cape Cod falls from 13.2%
+  to 6.7%, as deep sightlines into its rooms no longer count).
+- Shell changes on the porch set: -0% (Spanish colonial, Cape Cod), -1.8% (Victorian),
+  -3.6% (ab-6057), -6.9% (Tudor), -10% (craftsman), -22% (Greek Revival).
+- The largest capped builds are halls and atria: the French fire station (397k voxels), the
+  brewery, ab-11663, the luxury villa, the West Virginia capitol.
+- Tall hotels and towers that the big-opening flood reached are capped too, though they were
+  never `large_opening`. That is why 108 builds are flagged and only 69 were before.
 
 ### Duplicates
 
@@ -368,11 +478,12 @@ vary in scale, sometimes on purpose. `schemset/storey.py` measures floor-to-floo
 Confidence: 115 high, 38 medium, 111 low (mostly one storey, measured floor to roof), 53
 unknown (317 builds, after the Phase 3 fixes; the table above is from the first run).
 
-### Flags (after the Phase 3 fixes)
+### Flags (normalize-4)
 
 | Flag | Meaning | Builds |
 | --- | --- | ---: |
-| `large_opening` | more than 30% of the deep covered air is exterior: an open hall or garage, a wide arch, a hollow facade shell. Kept as exterior; review | 69 |
+| `deep_cover_capped` | the depth cap turned more than 200 air voxels interior: halls, hollow shells, open ground floors, atria; review | 108 |
+| `large_opening` | more than 30% of the deep covered air is still exterior after the cap: two gas-station canopies, a train station, a barn, the Richelieu cliff house, the roofless brick tenement shell and five others | 11 |
 | `crop_aggressive` | the crop removed more than 50% of non-air blocks, usually a big terrain capture | 65 |
 | `multi_building` | more than one large separate mass remains (at least 15% of the biggest and 500 blocks): compounds, rows, campuses; all are kept | 10 |
 | `crop_kept_landscape` | soft blocks (plants, turf, water) are over 10% of what the crop kept | 8 |
@@ -390,15 +501,19 @@ gets one card:
 - an overlay toggle: red = outside-visible but not trained on, orange = below ground and
   ignored, pink = landscape (removed before, kept soft blocks after), blue = removed site
   structures;
-- filters by split, category, flag and the fixed cases of the review;
+- filters by split, category, flag, the fixed cases of the latest change (the hall and
+  porch sets), the earlier review cases, and "cap changed" (shell more than 5% different
+  from the previous run);
 - sorts by most ignored, most removed, biggest and most changed against the previous run;
 - search.
 
 ### Limitations after the Phase 3 fixes
 
-- **`large_opening` builds (69)** are mostly halls, garages, open ground floors and hollow
-  facade shells. Their inner walls are now shell, which is right for what is open but may
-  not be what a photo shows.
+- **Covered exterior air is supervised only 6 steps deep** (D22 amended). The middle of a
+  very large canopy, a long covered passage or a deep veranda beyond 6 is ignored, like a
+  hall interior.
+- **`large_opening` builds (11)** still have much exterior air under cover after the cap:
+  canopies, station halls, barns, and a facade shell whose hollow has no roof.
 - **`ground_fallback` builds (4)** are houses built into a slope. With no ground, their
   buried parts are supervised, and rooms dug into the removed hill open up (the Richelieu
   cliff house).

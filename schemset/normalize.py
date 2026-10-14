@@ -56,8 +56,8 @@ from pathlib import Path
 
 import numpy as np
 
-VERSION = "normalize-3"             # 3: Phase 3 fixes -- D22 opening-size interior, D23
-                                    #    terrain and per-column ground, site lines, trees
+VERSION = "normalize-4"             # 4: D22 amended -- covered exterior air capped at
+                                    #    COVER_DEPTH (3: Phase 3 fixes, D22 / D23)
 
 
 # --------------------------------------------------------------------------- per build
@@ -380,7 +380,7 @@ def main(argv=None) -> int:
 
     if not args.no_review:
         from .gallery import build_gallery
-        page = build_gallery(dataset, workers=args.workers)
+        page = build_gallery(dataset, only={r["id"] for r in todo}, workers=args.workers)
         print(f"review gallery: {page}")
     print(f"ok {summary['ok']}, failed {summary['failed']}, pending "
           f"{summary['builds'] - summary['ok'] - summary['failed']}")

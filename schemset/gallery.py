@@ -2,7 +2,7 @@
 """Review gallery: one card per normalized build, before and after the crop.
 
 Usage:  python -m schemset.gallery --dataset data/real-schems-v1 [--only <id> ...]
-                                   [--workers N]
+                                   [--workers N] [--force]
 
 Writes `<dataset>/review/gallery_v2/` (gitignored, like all of data/): `index.html`, which
 opens locally, and `img/`. Each card shows the source (BEFORE the crop) and every kept block
@@ -14,9 +14,12 @@ an overlay toggle:
     pink    classed as landscape: removed (before) or kept soft blocks (after)
     blue    removed as a site structure (before): boundary walls, paths, plazas, clutter
 
-Filters: split, top-level category, flag, the "fixed cases" of the Phase 3 review; sorts:
-most ignored, most removed, biggest, most changed against the previous pipeline version
-(`normalized/previous_run.json`); and a search over id, name and creator.
+Filters: split, top-level category, flag, the "fixed cases" (the builds the latest rule
+change was made for, `FIXED_CASES`), the earlier review cases (`EARLIER_CASES`), and "cap
+changed" (shell more than `CHANGED_SHELL` different from the previous pipeline version,
+`normalized/previous_run.json`); sorts: most ignored, most removed, biggest, most changed
+against the previous version; and a search over id, name and creator. Images are cached in
+`images.json`; `--force` (or `--only`) draws them again.
 """
 from __future__ import annotations
 
@@ -36,19 +39,28 @@ MARK = {"ignored": "minecraft:red_concrete[r2m=ignored]",
         "landscape": "minecraft:pink_concrete[r2m=landscape]",
         "site": "minecraft:light_blue_concrete[r2m=site]"}
 
-# Builds named in the Phase 3 review (2026-10-12): crop cases, ground bugs, porch/overhang.
+# The depth cap under cover (D22 amended, 2026-10-14): hollow shells and open halls it is
+# for, and the porch set it must not hurt.
 FIXED_CASES = {
-    "crop": ["pmc-chapel-in-the-cemetery-download", "ab-4273",
-             "pmc-east-german-kt60-gym-hall-turnhalle", "ab-11853"],
-    "ground": ["pmc-european-building-12-kaiserthal-project-by-tim0fei",
-               "pmc-10-early-19-century-style-rowhouses", "pmc-eunpyeong-public-library-seoul",
-               "pmc-richelieu-contemporary", "pmc-19th-century---brewery", "pmc-old-warehouse"],
+    "hall": ["pmc-baroque-townhouse", "pmc-brick-tenement-house", "pmc-old-tenement-house",
+             "pmc-adelaide-hotel-toronto", "pmc-warehouse-factory-hall",
+             "pmc-aircraft-hangar-private-jet-hangar-1-5-1-scale-1-1-scale-adaptable-full-interiors",
+             "ab-13526"],
     "porch": ["ab-6057", "pmc-triple-gable-tudor-townhouse-6884362",
               "pmc-cape-cod-house---furnished",
               "pmc-small-craftsman-house---exterior-amp-landscape-only",
               "pmc-victorian-queen-anne-style---carson-mansion",
               "pmc-spanish-colonial-house---philippines", "pmc-greek-revival-plantation-house"],
 }
+# Builds named in the Phase 3 review (2026-10-12): crop cases and ground bugs.
+EARLIER_CASES = {
+    "crop": ["pmc-chapel-in-the-cemetery-download", "ab-4273",
+             "pmc-east-german-kt60-gym-hall-turnhalle", "ab-11853"],
+    "ground": ["pmc-european-building-12-kaiserthal-project-by-tim0fei",
+               "pmc-10-early-19-century-style-rowhouses", "pmc-eunpyeong-public-library-seoul",
+               "pmc-richelieu-contemporary", "pmc-19th-century---brewery", "pmc-old-warehouse"],
+}
+CHANGED_SHELL = 0.05             # "cap changed": shell differs from the previous run by more
 
 
 def _marked(blocks: np.ndarray, palette: list[str], marks: dict) -> tuple[np.ndarray, list[str]]:
@@ -116,17 +128,20 @@ def _change(rec: dict, prev: dict | None) -> dict:
 def card_data(rec: dict, row: dict, prev: dict | None, images: dict) -> dict:
     c, m = rec["crop"], rec["masks"]
     fixed = [k for k, ids in FIXED_CASES.items() if rec["id"] in ids]
+    earlier = [k for k, ids in EARLIER_CASES.items() if rec["id"] in ids]
+    change = _change(rec, prev)
     return {
         "id": rec["id"], "name": row.get("build_name") or "", "creator": row.get("creator") or "",
         "url": row.get("source_url") or "", "split": rec["split"],
         "cat": rec["building_category"], "top": rec["building_category"].split("/")[0],
-        "flags": rec["flags"], "fixed": fixed,
+        "flags": rec["flags"], "fixed": fixed, "earlier": earlier,
+        "cap_changed": change["shell"] is not None and abs(change["shell"]) > CHANGED_SHELL,
         "removed": c["removed_fraction"], "ignored": m["visible_ignored_fraction"],
         "below": m["below_ground_fraction"], "interior": m["interior_fraction"],
         "shell": m["shell"], "kept": c["non_air_after"], "dims": c.get("dims_after"),
         "ground": f"{c['ground_level']} ({c['ground_method']})",
         "storey": f"{rec['storey']['blocks_per_storey']} ({rec['storey']['confidence']})",
-        "change": _change(rec, prev), "img": images,
+        "change": change, "img": images,
     }
 
 
@@ -162,7 +177,8 @@ select,input{font:inherit;padding:4px 6px}
 <input id="q" placeholder="search id / name / creator" size="22">
 <select id="split"><option value="">all splits</option><option>train</option><option>val</option><option>test</option></select>
 <select id="cat"><option value="">all categories</option></select>
-<select id="flag"><option value="">any flags</option><option value="__fixed">fixed cases (Phase 3 review)</option></select>
+<select id="flag"><option value="">any flags</option><option value="__fixed">fixed cases (depth cap: halls + porches)</option>
+<option value="__cap">cap changed (shell &gt; 5% vs previous run)</option><option value="__earlier">earlier cases (crop, ground)</option></select>
 <select id="sort"><option value="fixed">sort: fixed cases first</option><option value="ignored">sort: most ignored</option>
 <option value="removed">sort: most removed</option><option value="size">sort: biggest</option>
 <option value="changed">sort: most changed vs previous run</option><option value="name">sort: id</option></select>
@@ -190,7 +206,8 @@ function img(r, key, ov) {
 }
 function card(r, ov) {
   const tags = r.flags.map(f => `<span class="tag${BAD.has(f) ? ' bad' : ''}">${f}</span>`).join("")
-    + r.fixed.map(f => `<span class="tag fix">fixed: ${f}</span>`).join("");
+    + r.fixed.map(f => `<span class="tag fix">fixed: ${f}</span>`).join("")
+    + (r.cap_changed ? `<span class="tag fix">cap changed</span>` : "");
   const ch = r.change;
   return `<div class="card"><div class="pics">${img(r,"before0",ov)}${img(r,"before1",ov)}${img(r,"after0",ov)}${img(r,"after1",ov)}</div>
   <div class="lab"><div>BEFORE crop (source)</div><div>AFTER crop (all kept blocks)</div></div>
@@ -207,7 +224,8 @@ function draw() {
   const q = $("q").value.toLowerCase(), sp = $("split").value, ca = $("cat").value, fl = $("flag").value;
   const ov = $("ov").checked, so = $("sort").value;
   let rows = R.filter(r => (!sp || r.split === sp) && (!ca || r.top === ca)
-    && (!fl || (fl === "__fixed" ? r.fixed.length : r.flags.includes(fl)))
+    && (!fl || (fl === "__fixed" ? r.fixed.length : fl === "__cap" ? r.cap_changed
+               : fl === "__earlier" ? r.earlier.length : r.flags.includes(fl)))
     && (!q || (r.id + " " + r.name + " " + r.creator).toLowerCase().includes(q)));
   const key = {ignored: r => -r.ignored, removed: r => -r.removed, size: r => -r.kept,
                changed: r => -r.change.score, name: r => r.id,
@@ -231,7 +249,7 @@ def write_page(out_dir: Path, cards: list[dict]) -> Path:
     return path
 
 
-def build_gallery(dataset: Path, only=None, workers: int = 1) -> Path:
+def build_gallery(dataset: Path, only=None, workers: int = 1, force: bool = False) -> Path:
     dataset = Path(dataset)
     norm = dataset / "normalized"
     out_dir = dataset / "review" / "gallery_v2"
@@ -244,7 +262,8 @@ def build_gallery(dataset: Path, only=None, workers: int = 1) -> Path:
     prev = json.loads(prev_path.read_text(encoding="utf-8"))["builds"] if prev_path.is_file() else {}
     cache_path = out_dir / "images.json"
     images = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.is_file() else {}
-    todo = [r for r in records if only is None or r["id"] in only or r["id"] not in images]
+    todo = [r for r in records
+            if force or (only is not None and r["id"] in only) or r["id"] not in images]
     args = [(str(dataset), r, str(out_dir / "img")) for r in todo]
     if workers > 1 and len(args) > 1:
         with ProcessPoolExecutor(max_workers=workers) as pool:
@@ -266,8 +285,10 @@ def main(argv=None) -> int:
     ap.add_argument("--dataset", type=Path, required=True)
     ap.add_argument("--only", nargs="*", default=None)
     ap.add_argument("--workers", type=int, default=1)
+    ap.add_argument("--force", action="store_true", help="draw every image again")
     args = ap.parse_args(argv)
-    path = build_gallery(args.dataset, set(args.only) if args.only else None, args.workers)
+    path = build_gallery(args.dataset, set(args.only) if args.only else None, args.workers,
+                         args.force)
     print(f"gallery: {html.escape(str(path))}")
     return 0
 

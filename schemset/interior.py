@@ -21,6 +21,18 @@ gap, not a room -- the strip between a garden wall or a hedge and the house unde
 eaves, a narrow passage open at both ends -- and is exterior too. Through a doorway or a
 window only a narrow tube of a room has that line of sight.
 
+Depth under cover (D22 amended): covered exterior air is supervised only near the outside.
+After the steps above, each exterior air voxel's distance is measured -- 6-connected steps
+through exterior air only -- from *uncovered* exterior air (no block anywhere above it in
+its column; exterior air on the grid's boundary counts as uncovered too). Exterior air more
+than `COVER_DEPTH` steps away becomes interior, and the shell is taken afterwards, so
+blocks that touch only that deep air are ignored. Porches, verandas, loggias, eaves and
+jetties are shallower than that and stay exterior; the inside of an open hall, a hollow
+facade shell or an open ground floor beyond `COVER_DEPTH` does not. Being covered from
+above still never, on its own, makes air interior -- only depth under cover does.
+`COVER_DEPTH` = 6 is the smallest depth that keeps every porch, veranda and loggia of the
+review's porch set (docs/real-schems-v1.md, "Depth cap under cover").
+
 Ground (from the crop): voxels at or below the ground height of their column count as
 solid for the flood, so a house whose floor was the grass plate does not flood from below,
 and blocks buried in the ground are not shell. Interior blocks are masked, never deleted.
@@ -29,12 +41,15 @@ and blocks buried in the ground are not shell. Interior blocks are masked, never
 hall, a garage with its door up, a wide arch into a courtyard building. Kept as exterior,
 flagged for review. *Deep* covered air has a block somewhere above it and is more than
 `DEEP` blocks (in its own layer) from open-sky air: eaves, soffits and ordinary porches are
-shallower than that, and would otherwise put most houses over the line.
+shallower than that, and would otherwise put most houses over the line. Measured after the
+depth cap. `deep_cover_capped`: the cap turned more than `CAPPED_FLAG` air voxels interior
+(`deep_cover_capped` in the stats is the count).
 
 `exposure` audits any set of masks the same way, whatever rule made them: a block is
-*outside-visible* when it touches exterior air or *open covered air* (covered air with a
-straight horizontal line of sight to the outside); visible blocks that are not shell are
-visible but ignored. Blocks below the ground height of their column that are not shell
+*outside-visible* when it touches exterior air or *open covered air* -- covered air with a
+straight horizontal line of sight to the outside, within `COVER_DEPTH` steps (through
+above-ground air) of uncovered air, the same depth the rule uses; visible blocks that are
+not shell are visible but ignored. Blocks below the ground height of their column that are not shell
 are below-ground ignored.
 """
 from __future__ import annotations
@@ -52,6 +67,8 @@ GAP_SIGHT = 0.75             # a pocket this much in sight of the outside is an 
 LARGE_OPENING = 0.30         # deep covered air that ends up exterior, above this share: flagged
 DEEP = 3                     # covered air further than this from open sky is "deep"
 LARGE_MIN = 50               # ...and at least this much of it is exterior
+COVER_DEPTH = 6              # covered exterior air further than this from uncovered air: interior
+CAPPED_FLAG = 200            # the cap turned more air than this interior: flagged
 
 
 @dataclass
@@ -120,13 +137,31 @@ def exterior_air(air: np.ndarray) -> np.ndarray:
     return big
 
 
-def exposure(solid, shell, exterior, height) -> tuple[dict, dict]:
+def _boundary(shape) -> np.ndarray:
+    edge = np.zeros(shape, bool)
+    edge[0], edge[-1], edge[:, 0], edge[:, -1], edge[:, :, 0], edge[:, :, -1] = (True,) * 6
+    return edge
+
+
+def near_uncovered(air: np.ndarray, solid: np.ndarray, depth: int) -> np.ndarray:
+    """Voxels of `air` within `depth` 6-connected steps, through `air` only, of uncovered
+    air (no block anywhere above it in its column, or on the grid's boundary)."""
+    roofed = np.maximum.accumulate(solid[:, ::-1, :], axis=1)[:, ::-1, :]
+    seeds = air & (~roofed | _boundary(air.shape))
+    if not seeds.any() or depth == 0:
+        return seeds
+    # depth < 0: no limit (every voxel of `air` connected to uncovered air)
+    return ndimage.binary_dilation(seeds, structure=SIX, iterations=max(depth, 0), mask=air)
+
+
+def exposure(solid, shell, exterior, height, cover_depth=None) -> tuple[dict, dict]:
     """Rule-independent audit: (stats, masks) -- see the module docstring."""
+    depth = COVER_DEPTH if cover_depth is None else cover_depth
     ground = ground_mask(solid.shape, height)
     above_air = ~solid & ~ground
     roofed = np.maximum.accumulate(solid[:, ::-1, :], axis=1)[:, ::-1, :]
     covered = above_air & roofed
-    open_covered = covered & sightline(above_air)
+    open_covered = covered & sightline(above_air) & near_uncovered(above_air, solid, depth)
     visible = solid & _touches(exterior | open_covered)
     visible_ignored = visible & ~shell
     Y = solid.shape[1]
@@ -152,7 +187,9 @@ def compute_masks(blocks: np.ndarray, height=None) -> Masks:
     solid = blocks != 0
     ground = ground_mask(blocks.shape, height)
     air = ~(solid | ground)
-    exterior = exterior_air(air)
+    reached = exterior_air(air)
+    exterior = near_uncovered(reached, solid, COVER_DEPTH)       # the depth cap
+    capped = int((reached & ~exterior).sum())
     shell = solid & _touches(exterior)
     interior = ~(exterior | shell)
 
@@ -182,6 +219,8 @@ def compute_masks(blocks: np.ndarray, height=None) -> Masks:
         "deep_covered_air": deep_n,
         "deep_covered_exterior": deep_ext,
         "deep_exterior_share": round(deep_ext / deep_n, 4) if deep_n else None,
+        "cover_depth": COVER_DEPTH,
+        "deep_cover_capped": capped,
         "interior_fraction": round(int(interior.sum()) / max(int(interior.sum())
                                                               + int(shell.sum()), 1), 4),
         "interior_solid_fraction": round(int((interior & solid).sum())
@@ -192,4 +231,6 @@ def compute_masks(blocks: np.ndarray, height=None) -> Masks:
     flags = []
     if deep_ext >= LARGE_MIN and deep_ext > LARGE_OPENING * deep_n:
         flags.append("large_opening")
+    if capped > CAPPED_FLAG:
+        flags.append("deep_cover_capped")
     return Masks(shell, exterior, interior, stats, flags)

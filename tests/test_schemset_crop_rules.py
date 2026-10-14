@@ -128,13 +128,79 @@ class InteriorByOpening(unittest.TestCase):
         self.assertTrue(m.exterior[at(crop, 15, 2, 9)])     # the strip between wall and house
         self.assertTrue(m.shell[at(crop, 15, 2, 10)])
 
-    def test_large_opening_flagged(self):
+    def test_big_door_into_a_hall(self):
+        """D22 amended: the outside reaches in through a big door, but only COVER_DEPTH deep."""
+        from schemset.interior import COVER_DEPTH
         g = plate()
         box(g, 10, 30, 2, 9, 10, 30)                      # a hall
         g[18:23, 3:7, 10] = 0                            # 5-wide, 4-tall door, open
         crop, m = run(g)
-        self.assertTrue(m.exterior[at(crop, 20, 4, 20)])
-        self.assertIn("large_opening", m.flags)
+        self.assertTrue(m.exterior[at(crop, 20, 4, 10 + COVER_DEPTH - 1)])
+        self.assertFalse(m.exterior[at(crop, 20, 4, 20)])       # deep inside: interior
+        self.assertIn("deep_cover_capped", m.flags)
+        self.assertGreater(m.stats["deep_cover_capped"], 200)
+
+
+@unittest.skipUnless(HAVE_MCVOXEL, "mcvoxel (requirements-synth.txt) not installed")
+class DepthUnderCover(unittest.TestCase):
+    """D22 amended: covered exterior air is supervised only within COVER_DEPTH of open sky."""
+
+    def test_four_deep_porch_stays_exterior(self):
+        g = plate()
+        box(g, 10, 22, 2, 8, 10, 18)
+        g[10:23, 2, 19:23] = PLANKS                      # porch deck, 4 deep (z 19..22)
+        g[10:23, 8, 19:23] = BRICKS                      # porch roof
+        for x in (10, 16, 22):
+            g[x, 3:8, 22] = LOG
+        crop, m = run(g)
+        for z in range(19, 23):
+            self.assertTrue(m.exterior[at(crop, 13, 4, z)], z)
+        self.assertTrue(m.shell[at(crop, 13, 4, 18)])       # the wall behind the porch
+        self.assertNotIn("deep_cover_capped", m.flags)
+
+    def test_open_fronted_hall(self):
+        from schemset.interior import COVER_DEPTH
+        g = plate()
+        box(g, 10, 24, 2, 9, 12, 23)                      # walls on all sides...
+        g[11:24, 3:9, 23] = 0                            # ...but the +z front is open
+        g[10:25, 2:10, 4:13] = BRICKS                    # solid building behind the hall
+        crop, m = run(g)                                  # depth: z 23 (1) back to z 13 (11)
+        for z in range(13, 24):
+            k = 24 - z
+            self.assertEqual(bool(m.exterior[at(crop, 17, 5, z)]), k <= COVER_DEPTH, k)
+        self.assertFalse(m.shell[at(crop, 17, 5, 12)])      # the back wall: ignored
+
+    def test_hollow_shell_with_a_beam(self):
+        g = plate(x=40, y=24, z=40)
+        box(g, 8, 32, 2, 18, 8, 32)                       # hollow box, roofed
+        g[19:22, 3:6, 8] = 0                             # one 3-wide, 3-tall opening
+        beam = [(x, 4 + (x - 14) // 2, 30 - (x - 14)) for x in range(14, 27)]
+        for x, y, z in beam:                             # a diagonal beam, far from it
+            g[x, y, z] = LOG
+        crop, m = run(g)
+        self.assertTrue(m.exterior[at(crop, 20, 4, 9)])     # just inside the opening
+        for x, y, z in beam:
+            self.assertFalse(m.shell[at(crop, x, y, z)], (x, y, z))
+
+    def test_courtyard_facades_stay_shell(self):
+        g = plate(x=40, y=16, z=40)
+        g[8:31, 2:9, 8:31] = BRICKS                      # a block...
+        g[14:25, 2:9, 14:25] = 0                         # ...around an open courtyard
+        g[14:25, 2, 14:25] = PLANKS                      # courtyard paving
+        crop, m = run(g)
+        self.assertTrue(m.shell[at(crop, 13, 5, 19)])       # courtyard facade
+        self.assertTrue(m.shell[at(crop, 19, 5, 13)])
+        self.assertTrue(m.exterior[at(crop, 19, 5, 19)])
+        self.assertEqual(m.stats["deep_cover_capped"], 0)
+
+    def test_two_deep_jetty_stays_exterior(self):
+        g = plate()
+        box(g, 10, 18, 2, 6, 10, 18)                      # ground floor
+        box(g, 8, 20, 6, 11, 8, 20)                       # upper floor overhangs by 2
+        crop, m = run(g)
+        self.assertTrue(m.exterior[at(crop, 8, 4, 14)])
+        self.assertTrue(m.exterior[at(crop, 9, 4, 14)])
+        self.assertTrue(m.shell[at(crop, 10, 4, 14)])
 
 
 @unittest.skipUnless(HAVE_MCVOXEL, "mcvoxel (requirements-synth.txt) not installed")
