@@ -10,6 +10,10 @@ or documented property:
   200-block tower loses anything under ~2-3 blocks. The clean model is voxelised at
   `bottleneck` cells across its longest axis (96-160), blurred, and re-extracted with
   marching cubes: rounded corners, lost railings and mullions, merged thin walls.
+  `min_blur_units` (default 0, off) sets a floor on that blur in the scene's own units:
+  `schemset.pairs` uses it so Minecraft's one-block stair steps do not survive into an
+  input of a small build (real buildings, and TRELLIS's reconstructions of them, have
+  smooth roofs).
 * **Surface noise and "melting".** Smooth low-frequency displacement along the normals
   (Real2Minecraft's notes call TRELLIS buildings "melted statues").
 * **Holes and floaters.** Measured on the 54 cached TRELLIS meshes: 0% watertight, median
@@ -55,6 +59,7 @@ class DegradeParams:
     back_tint_deg: float = 0.0       # 0 = no wrong tint
     color_smooth: int = 2            # Laplacian passes over vertex colours
     seed: int = 0
+    min_blur_units: float = 0.0      # blur sigma floor in scene units (0 = off; not sampled)
 
 
 def sample_params(rng: np.random.Generator, ranges: dict | None = None) -> DegradeParams:
@@ -109,8 +114,9 @@ def degrade(scene: SceneMesh, p: DegradeParams):
     off = -lo * s + 0.5
     vm = voxelize_scene(scene, s, offset=off, drop_ground=False, keep_largest=False, clean=False,
                         with_shapes=False, with_colors=True, color_fallback="nearest")
-    pad = 3
-    field = ndimage.gaussian_filter(np.pad(vm.solid.astype(np.float32), pad), p.blur_sigma)
+    sigma = max(p.blur_sigma, p.min_blur_units * s)
+    pad = max(3, int(np.ceil(3 * sigma)) + 1)       # room for the blur beyond the model
+    field = ndimage.gaussian_filter(np.pad(vm.solid.astype(np.float32), pad), sigma)
     if field.max() < 0.5:
         raise ValueError("model vanished at the bottleneck resolution")
     verts, faces, _, _ = marching_cubes(field, level=0.5)
@@ -185,7 +191,8 @@ def degrade(scene: SceneMesh, p: DegradeParams):
                     vcolor=rgb, face_mat=np.zeros(len(faces), np.int32),
                     materials=[Material(name="trellis_bake", base_rgba=np.ones(4), image=None, image_alpha=None,
                                         alpha_mode="OPAQUE", kind=KIND_SURFACE)])
-    info = {"params": asdict(p), "mc_faces": int(n_faces_mc), "faces": int(len(faces)),
+    info = {"params": asdict(p), "blur_sigma_cells": round(float(sigma), 3), "mc_faces": int(n_faces_mc),
+            "faces": int(len(faces)),
             "holes": int(holes), "floater_faces": int(n_float), "back_facing_share": round(float(back.mean()), 3)}
     info.update(mesh_stats(verts_units, faces))
     return out, info

@@ -12,7 +12,8 @@ over to the new pairs.
 | Objaverse synth path | `synth/select.py`, `synth/fetch.py`, `synth/objaverse_index.py`, `synth/run.py` | **PARKED** (D13): kept, possible pretraining source |
 | Grammar houses | `house_grammar.py`, `gen_houses.py`, `house_params.py` | **PARKED** |
 | The 16 synthetic-house builds in `data/builds/` | — | **EXCLUDED** from any real-build dataset |
-| TRELLIS-like degradation, real-TRELLIS comparison, real evaluation | `synth/degrade.py`, `synth/trellis_compare.py`, `synth/real_eval.py` | **ACTIVE**, reused |
+| TRELLIS-like degradation, real-TRELLIS comparison, real evaluation | `synth/degrade.py`, `synth/trellis_compare.py`, `synth/real_eval.py` | **ACTIVE**, reused. `degrade` gained an optional blur floor, `min_blur_units` (default 0 = unchanged), for Phase 4 |
+| Schematic pairs (Phase 4, D16) | `schemset/meshify.py`, `schemset/pairs.py`, `schemset/pairs_calibrate.py`, `schemset/real_trellis.py`, `schemset/pairs_gallery.py` | **ACTIVE**: [pairs-v1.md](pairs-v1.md) |
 | Shared voxel core | Real2Minecraft `mcvoxel/` | **ACTIVE**, reused |
 | Rule-based building mode | Real2Minecraft `building/` | **ACTIVE** as the baseline (D18) |
 
