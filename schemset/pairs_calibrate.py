@@ -21,6 +21,13 @@ cleanup). The same statistics are then taken on both sides:
     calibration  fill_gain, rough3 (blobby shell), lum (L*), chroma (C*), nbr_de
                  (neighbour colour difference) -- `synth.calibrate`
 
+Also in the tables: the real-TRELLIS evaluation sets (`schemset.real_trellis`: smooth
+photos = the main set, blocky photos = the stress test) where they have been placed, and
+with `--before <index.json>` an earlier pairs version (the colour model's before / after).
+`colour_acceptance` checks the colour model against TRELLIS on real photos: the synthetic
+median inside the reference p10-p90 for lum, chroma and nbr_de, at least `INSIDE_MIN` of
+the synthetic inputs inside that band for lum and chroma, and `pairs.COLOUR_TARGET`.
+
 Writes <dataset>/pairs/trellis_reference.json (cached; --refresh redoes it) and
 <dataset>/pairs/calibration.json (p10 / p50 / p90 side by side, and the overlap verdict
 for the blockiness metrics). The synthetic side is read from pairs/index.json. Size
@@ -39,6 +46,9 @@ from pathlib import Path
 import numpy as np
 
 BLOCKY = ("stair45", "normal_roughness")
+COLOUR_KEYS = ("lum", "chroma", "nbr_de")
+INSIDE_MIN = 0.70
+EVAL_SETS = {"eval_smooth": "real_trellis_smooth", "eval_blocky": "real_trellis"}
 REPORT = ("stair45", "normal_roughness", "lattice16", "axis_area", "fill_gain", "rough3",
           "lum", "chroma", "nbr_de")
 NOT_BUILDINGS = ("Car_", "Tree_")
@@ -128,8 +138,44 @@ def size_bins(sizes) -> list:
     return [(size, edges[i], edges[i + 1]) for i, size in enumerate(s)]
 
 
+def eval_rows(dataset: Path) -> dict:
+    """{set: [per-build stats]} of the placed real-TRELLIS sets (the TRELLIS mesh's
+    roughness and the 2x input's statistics, as for a synthetic input)."""
+    out = {}
+    for key, folder in EVAL_SETS.items():
+        path = dataset / "pairs" / folder / "index.json"
+        if path.is_file():
+            rows = [b for b in json.loads(path.read_text(encoding="utf-8"))["builds"] if b.get("status") == "ok"]
+            if rows:
+                out[key] = [b["stats"] for b in rows]
+    return out
+
+
+def colour_acceptance(syn: list, ref: list) -> dict:
+    """The colour model against the reference (see the module docstring)."""
+    from .pairs import COLOUR_TARGET
+    res = {"checks": {}}
+    for k in COLOUR_KEYS:
+        o = overlap([r.get(k) for r in syn], [r.get(k) for r in ref])
+        res["checks"][f"{k}_p50_inside_reference_p10_p90"] = o.get("synthetic_p50_in_reference_p10_p90")
+        if k in ("lum", "chroma"):
+            res["checks"][f"{k}_share_inside_band"] = o.get("share_of_synthetic_in_reference_p10_p90")
+            res["checks"][f"{k}_share_inside_band_ok"] = (o.get("share_of_synthetic_in_reference_p10_p90") or 0) >= INSIDE_MIN
+    lum = pct([r.get("lum") for r in syn])
+    chroma = pct([r.get("chroma") for r in syn])
+    t = COLOUR_TARGET
+    res["targets"] = {"lum_p10": [lum[0], t["lum_p10"][0] <= lum[0] <= t["lum_p10"][1]],
+                      "lum_p50": [lum[1], t["lum_p50"][0] <= lum[1] <= t["lum_p50"][1]],
+                      "lum_p90": [lum[2], t["lum_p90"][0] <= lum[2] <= t["lum_p90"][1]],
+                      "chroma_p50": [chroma[1], t["chroma_p50"][0] <= chroma[1] <= t["chroma_p50"][1]],
+                      "chroma_p90": [chroma[2], chroma[2] <= t["chroma_p90_max"]]}
+    res["accepted"] = bool(all(v for k, v in res["checks"].items() if k.endswith(("_p90", "_ok")))
+                           and all(v[1] for v in res["targets"].values()))
+    return res
+
+
 def compare(dataset: Path, trellis: Path, sizes, refresh: bool = False, label: str = "",
-            workers: int = 1, pairs_rows=None) -> dict:
+            workers: int = 1, pairs_rows=None, before: Path = None) -> dict:
     pairs = dataset / "pairs"
     ref = trellis_reference(trellis, sizes, pairs / "trellis_reference.json", refresh, workers)
     norm = json.loads((dataset / "normalized" / "index.json").read_text(encoding="utf-8"))
@@ -157,6 +203,10 @@ def compare(dataset: Path, trellis: Path, sizes, refresh: bool = False, label: s
     groups = {"trellis_all": ref, "trellis_buildings": ref_b,
               "synthetic_all": [p["stats"] for p in pairs_rows],
               "synthetic_size_matched": matched_syn}
+    if before and Path(before).is_file():
+        prev = json.loads(Path(before).read_text(encoding="utf-8"))
+        groups["synthetic_before_" + prev.get("version", "?")] = [p["stats"] for p in prev["pairs"] if p.get("stats")]
+    groups.update(eval_rows(dataset))
     table = {k: {"n": len(rows), **{m: pct([r.get(m) for r in rows]) for m in REPORT}}
              for k, rows in groups.items()}
     verdict = {m: overlap([r.get(m) for r in matched_syn], [r.get(m) for r in matched_ref]) for m in REPORT}
@@ -165,6 +215,7 @@ def compare(dataset: Path, trellis: Path, sizes, refresh: bool = False, label: s
                        and not b.get(m, {}).get("synthetic_p50_in_reference_p10_p90", True)})
     return {"label": label, "smooth_sigma_blocks": smooth, "sizes": list(sizes), "table": table,
             "by_size": by_size, "overlap": verdict, "synthetic_blockier": blockier,
+            "colour": colour_acceptance(groups["synthetic_all"], ref_b),
             "reading": ("p10 / p50 / p90. overlap: synthetic against TRELLIS buildings, size-matched "
                         "(each synthetic build against the reference at the nearest size)")}
 
@@ -180,6 +231,10 @@ def print_table(res: dict) -> None:
         for m in BLOCKY:
             print(f"   {m:18s} synthetic {str(b['synthetic'][m]):>24s}   TRELLIS {str(b['trellis'][m]):>24s}")
     print("synthetic blockier than TRELLIS on:", res["synthetic_blockier"] or "none")
+    c = res["colour"]
+    print("colour model accepted:", c["accepted"])
+    for k, v in {**c["checks"], **c["targets"]}.items():
+        print(f"   {k:40s} {v}")
 
 
 def main(argv=None) -> int:
@@ -190,11 +245,12 @@ def main(argv=None) -> int:
     ap.add_argument("--refresh", action="store_true")
     ap.add_argument("--label", default="")
     ap.add_argument("--workers", type=int, default=1)
+    ap.add_argument("--before", type=Path, help="an earlier pairs/index.json, shown beside the current one")
     args = ap.parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     res = compare(args.dataset.resolve(), args.trellis.resolve(), args.sizes, args.refresh, args.label,
-                  args.workers)
+                  args.workers, before=args.before)
     path = args.dataset / "pairs" / "calibration.json"
     hist = json.loads(path.read_text(encoding="utf-8")).get("history", []) if path.is_file() else []
     hist = [h for h in hist if h.get("label") != res["label"] or not res["label"]] + [res]

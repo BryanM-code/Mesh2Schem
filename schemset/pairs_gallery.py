@@ -9,8 +9,9 @@ locally, and `img/`. One card per build with pairs:
 
     target            the supervised blocks (decoded mcvox-v3 targets; IGNORE not drawn)
     synthetic v0, v1  the first two synthetic inputs, 2 cells per block, in their own colours
-    real TRELLIS      the real-TRELLIS input (`schemset.real_trellis`), where it exists,
-                      and the photo that was sent to TRELLIS
+    real TRELLIS      per evaluation set (`schemset.real_trellis`: smooth photos = the main
+                      set, blocky photos = the stress test), the real-TRELLIS input where it
+                      exists, and the photo that was sent to TRELLIS
 
 and per variant the block-level IoU with the target volume, the frame residual, yaw, offset
 and bottleneck, plus the build's stair-step numbers. Filters: split, category, real-TRELLIS
@@ -29,6 +30,7 @@ import numpy as np
 
 SIZE = 300
 YAW, PITCH = 45, 30
+EVAL_SETS = (("smooth", "real_trellis_smooth"), ("blocky", "real_trellis"))
 
 
 def _target_image(target_shape, target_material):
@@ -81,7 +83,7 @@ def render_card(dataset: str, bid: str, files: dict, out_dir: str) -> dict:
     return {"id": bid, "images": images, "errors": errors}
 
 
-def card_data(bid, rows, row, rt, images) -> dict:
+def card_data(bid, rows, row, rts, images) -> dict:
     v = sorted(rows, key=lambda r: r["variant"])
     out = {"id": bid, "name": row.get("build_name") or "", "split": v[0]["split"],
            "cat": row.get("building_category") or "", "top": (row.get("building_category") or "").split("/")[0],
@@ -93,12 +95,14 @@ def card_data(bid, rows, row, rt, images) -> dict:
                          "bn": (r.get("degrade") or {}).get("bottleneck"),
                          "stair": (r.get("stats") or {}).get("stair45"),
                          "rough": (r.get("stats") or {}).get("normal_roughness")} for r in v],
-           "rt": None}
-    if rt:
-        out["rt"] = {"status": rt.get("status"), "iou": (rt.get("validation") or {}).get("iou"),
-                     "yaw": (rt.get("placement") or {}).get("yaw_deg"),
-                     "stair": (rt.get("stats") or {}).get("stair45"),
-                     "rough": (rt.get("stats") or {}).get("normal_roughness")}
+           "rt": {}}
+    for name, rt in rts.items():
+        out["rt"][name] = {"status": rt.get("status"), "iou": (rt.get("validation") or {}).get("iou"),
+                           "yaw": (rt.get("placement") or {}).get("yaw_deg"),
+                           "shift": (rt.get("placement") or {}).get("shift_cells"),
+                           "stair": (rt.get("stats") or {}).get("stair45"),
+                           "rough": (rt.get("stats") or {}).get("normal_roughness"),
+                           "folder": dict(EVAL_SETS)[name]}
     out["min_iou"] = min([x["iou"] for x in out["variants"] if x["iou"] is not None] or [1.0])
     out["size"] = int(np.prod(out["dims"])) if out["dims"] else 0
     return out
@@ -114,12 +118,12 @@ header{position:sticky;top:0;background:var(--card);border-bottom:1px solid var(
  display:flex;flex-wrap:wrap;gap:8px;align-items:center;z-index:2}
 header h1{font-size:16px;margin:0 10px 0 0}
 select,input{font:inherit;padding:4px 6px}
-#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(640px,1fr));gap:12px;padding:16px}
+#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(860px,1fr));gap:12px;padding:16px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:8px;overflow:hidden}
-.pics{display:grid;grid-template-columns:repeat(5,1fr);background:#f6f6f3}
+.pics{display:grid;grid-template-columns:repeat(7,1fr);background:#f6f6f3}
 .pics img,.pics .none{width:100%;aspect-ratio:1;object-fit:contain;display:block;cursor:zoom-in}
 .pics .none{display:flex;align-items:center;justify-content:center;color:#aaa;font-size:12px;cursor:default}
-.lab{display:grid;grid-template-columns:repeat(5,1fr);font-size:11px;color:var(--muted);text-align:center;
+.lab{display:grid;grid-template-columns:repeat(7,1fr);font-size:11px;color:var(--muted);text-align:center;
  border-bottom:1px solid var(--line)}
 .info{padding:8px 10px;font-size:12px;line-height:1.5}
 .info b{font-size:13px}
@@ -138,11 +142,11 @@ th{color:var(--muted);font-weight:normal}
 <input id="q" placeholder="search id / name" size="22">
 <select id="split"><option value="">all splits</option><option>train</option><option>val</option><option>test</option></select>
 <select id="cat"><option value="">all categories</option></select>
-<select id="sel"><option value="">all builds</option><option value="rt">real-TRELLIS set</option>
+<select id="sel"><option value="">all builds</option><option value="rt">real-TRELLIS sets</option>
 <option value="rej">with a rejected pair</option></select>
 <select id="sort"><option value="iou">sort: lowest IoU</option><option value="size">sort: biggest</option>
 <option value="name">sort: id</option></select>
-<span class="k">tiles: target · synthetic v0 · synthetic v1 · real TRELLIS input · photo sent to TRELLIS</span>
+<span class="k">tiles: target · synthetic v0 · v1 · TRELLIS input from the smooth photo (main) · from the blocky photo (stress test) · the two photos</span>
 </header>
 <div id="grid"></div>
 <div id="modal" onclick="this.style.display='none'"><img id="mimg"><div id="mtxt"></div></div>
@@ -160,10 +164,10 @@ function card(r) {
   const rows = r.variants.map(v => `<tr><td>v${v.k}</td><td>${v.status === "ok" ? "ok" : '<span class="tag bad">' + v.reason + "</span>"}</td>
     <td>${f(v.iou, 3)}</td><td>${v.res ? v.res.map(x => f(x, 2)).join(" ") : "–"}</td><td>${f(v.yaw, 1)}°</td>
     <td>${v.off ? v.off.map(x => f(x, 2)).join(" ") : "–"}</td><td>${v.bn}</td><td>${f(v.stair, 3)}</td><td>${f(v.rough, 1)}</td></tr>`).join("");
-  const rt = r.rt ? `<span class="k">real TRELLIS:</span> ${r.rt.status}${r.rt.iou != null ? " · IoU " + f(r.rt.iou, 3) + " · yaw " + r.rt.yaw + "° · stair45 " + f(r.rt.stair, 3) + " · roughness " + f(r.rt.rough, 1) : ""}<br>` : "";
-  const photo = r.rt ? `../real_trellis/${r.id}/photo.png` : null;
-  return `<div class="card"><div class="pics">${tile(r, "target")}${tile(r, "v0")}${tile(r, "v1")}${tile(r, "rt")}${photo ? tile(r, "photo", photo) : '<div class="none">–</div>'}</div>
-  <div class="lab"><div>target</div><div>synthetic v0</div><div>synthetic v1</div><div>real TRELLIS</div><div>photo</div></div>
+  const rt = Object.entries(r.rt).map(([n, s]) => `<span class="k">TRELLIS (${n} photo):</span> ${s.status}${s.iou != null ? " · IoU " + f(s.iou, 3) + " · yaw " + s.yaw + "° · shift " + (s.shift || []).join(",") + " cells · stair45 " + f(s.stair, 3) + " · roughness " + f(s.rough, 1) + "°" : ""}<br>`).join("");
+  const photo = n => r.rt[n] ? tile(r, "photo_" + n, `../${r.rt[n].folder}/${r.id}/photo.png`) : '<div class="none">–</div>';
+  return `<div class="card"><div class="pics">${tile(r, "target")}${tile(r, "v0")}${tile(r, "v1")}${tile(r, "rt_smooth")}${tile(r, "rt_blocky")}${photo("smooth")}${photo("blocky")}</div>
+  <div class="lab"><div>target</div><div>synthetic v0</div><div>synthetic v1</div><div>TRELLIS · smooth</div><div>TRELLIS · blocky</div><div>photo · smooth</div><div>photo · blocky</div></div>
   <div class="info"><b>${r.id}</b> <span class="k">${r.name}</span><br>
   <span class="k">split</span> ${r.split} · <span class="k">category</span> ${r.cat} · <span class="k">target</span> ${r.dims ? r.dims.join("×") : "–"} blocks<br>${rt}
   <table><tr><th></th><th>status</th><th>IoU</th><th>frame residual (cells)</th><th>yaw</th><th>offset (blocks)</th><th>bottleneck</th><th>stair45</th><th>rough°</th></tr>${rows}</table></div></div>`;
@@ -171,7 +175,7 @@ function card(r) {
 function draw() {
   const q = $("q").value.toLowerCase(), sp = $("split").value, ca = $("cat").value, se = $("sel").value, so = $("sort").value;
   let rows = R.filter(r => (!sp || r.split === sp) && (!ca || r.top === ca)
-    && (!se || (se === "rt" ? r.rt : r.variants.some(v => v.status !== "ok")))
+    && (!se || (se === "rt" ? Object.keys(r.rt).length : r.variants.some(v => v.status !== "ok")))
     && (!q || (r.id + " " + r.name).toLowerCase().includes(q)));
   const key = {iou: r => r.min_iou, size: r => -r.size, name: r => r.id}[so];
   rows.sort((a, b) => { const x = key(a), y = key(b); return x < y ? -1 : x > y ? 1 : 0; });
@@ -195,13 +199,16 @@ def build_gallery(dataset: Path, only=None, workers: int = 1, force: bool = Fals
     by_build = {}
     for p in index["pairs"]:
         by_build.setdefault(p["id"], []).append(p)
-    rt_path = dataset / "pairs" / "real_trellis" / "index.json"
-    sel_path = dataset / "pairs" / "real_trellis" / "selection.json"
-    rt = {}
-    if rt_path.is_file():
-        rt = {b["id"]: b for b in json.loads(rt_path.read_text(encoding="utf-8"))["builds"]}
-    elif sel_path.is_file():
-        rt = {b["id"]: {"status": "awaiting_trellis"} for b in json.loads(sel_path.read_text(encoding="utf-8"))["builds"]}
+    rts = {}                                          # id -> {set: row}
+    for name, folder in EVAL_SETS:
+        rt_path = dataset / "pairs" / folder / "index.json"
+        sel_path = dataset / "pairs" / folder / "selection.json"
+        if rt_path.is_file():
+            for b in json.loads(rt_path.read_text(encoding="utf-8"))["builds"]:
+                rts.setdefault(b["id"], {})[name] = b
+        elif sel_path.is_file():
+            for b in json.loads(sel_path.read_text(encoding="utf-8"))["builds"]:
+                rts.setdefault(b["id"], {})[name] = {"status": "awaiting_trellis"}
     cache_path = out_dir / "images.json"
     images = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.is_file() else {}
     jobs = []
@@ -209,8 +216,9 @@ def build_gallery(dataset: Path, only=None, workers: int = 1, force: bool = Fals
         if not (force or (only is not None and bid in only) or bid not in images):
             continue
         files = {f"v{p['variant']}": p["file"] for p in ps if p["status"] == "ok" and p["variant"] in (0, 1)}
-        if (dataset / "pairs" / "real_trellis" / bid / "input.npz").is_file():
-            files["rt"] = f"real_trellis/{bid}/input.npz"
+        for name, folder in EVAL_SETS:
+            if (dataset / "pairs" / folder / bid / "input.npz").is_file():
+                files["rt_" + name] = f"{folder}/{bid}/input.npz"
         jobs.append((str(dataset), bid, files, str(out_dir / "img")))
     if workers > 1 and len(jobs) > 1:
         with ProcessPoolExecutor(max_workers=workers) as pool:
@@ -222,7 +230,7 @@ def build_gallery(dataset: Path, only=None, workers: int = 1, force: bool = Fals
         for e in res["errors"]:
             print(f"  {res['id']}: {e}", flush=True)
     cache_path.write_text(json.dumps(images, indent=1) + "\n", encoding="utf-8", newline="\n")
-    cards = [card_data(bid, ps, rows.get(bid, {}), rt.get(bid), images.get(bid, {}))
+    cards = [card_data(bid, ps, rows.get(bid, {}), rts.get(bid, {}), images.get(bid, {}))
              for bid, ps in sorted(by_build.items())]
     data = json.dumps(cards, ensure_ascii=False).replace("</", "<\\/")
     page = out_dir / "index.html"

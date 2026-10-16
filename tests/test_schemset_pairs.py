@@ -366,6 +366,103 @@ class PairValidation(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_MCVOXEL, SKIP)
+class ColourModel(unittest.TestCase):
+    """pairs-2: colour re-fitted to TRELLIS on real photos (COLOUR, GLASS, COLOUR_TARGET)."""
+
+    def test_sampled_colour_params_stay_in_their_ranges(self):
+        from schemset.pairs import COLOUR, GLASS, sample_variant
+        gains = []
+        for seed in range(200):
+            v = sample_variant(seed)
+            d = v["degrade"]
+            for k in ("tone_gain", "ambient", "chroma", "color_noise"):
+                self.assertTrue(COLOUR[k][0] <= d[k] <= COLOUR[k][1], (k, d[k]))
+            self.assertEqual(d["chroma_gamma"], COLOUR["chroma_gamma"])
+            for k in ("lum", "a", "b", "jitter", "sky", "sky_lift"):
+                self.assertTrue(GLASS[k][0] <= v["glass"][k] <= GLASS[k][1], (k, v["glass"][k]))
+            gains.append(d["tone_gain"])
+        # exposure is uniform in log: its median sits at the geometric mean of the range
+        lo, hi = COLOUR["tone_gain"]
+        self.assertAlmostEqual(float(np.median(gains)), (lo * hi) ** 0.5, delta=0.06)
+
+    def test_inputs_land_in_the_target_band(self):
+        from schemset.meshify import meshify
+        from schemset.pairs import COLOUR_TARGET, input_stats, make_input, sample_variant
+        h = house()
+        mesh, _ = meshify(h["blocks"], h["palette"], h["exterior"], h["ground_height"])
+        lum, chroma = [], []
+        for seed in range(1000, 1006):
+            vm, _, _, _ = make_input(mesh, h["blocks"].shape, sample_variant(seed))
+            st = input_stats(vm)
+            lum.append(st["lum"])
+            chroma.append(st["chroma"])
+        lo, hi = COLOUR_TARGET["lum_p10"][0], COLOUR_TARGET["lum_p90"][1]
+        self.assertTrue(all(lo <= x <= hi for x in lum), lum)
+        self.assertLessEqual(float(np.mean(chroma)), COLOUR_TARGET["chroma_p90_max"])
+        self.assertGreater(max(lum) / min(lum), 1.5, lum)    # exposure varies per sample
+
+    def test_glass_is_dark_and_cool(self):
+        from mcvoxel.block_palette import srgb_to_lab
+        from mcvoxel.scene import KIND_GLASS
+        from schemset.meshify import meshify
+        from schemset.pairs import glass_look
+        h = house()
+        mesh, _ = meshify(h["blocks"], h["palette"], h["exterior"], h["ground_height"])
+        look = {"lum": 22.0, "a": -1.0, "b": -6.0, "jitter": 0.0, "sky": 0.0, "sky_lift": 0.0, "seed": 0}
+        out = glass_look(mesh, look)
+        glass = np.unique(mesh.faces[mesh.face_mat == KIND_GLASS])
+        self.assertGreater(len(glass), 0)
+        lab = srgb_to_lab(out.vcolor[glass])
+        self.assertTrue(np.allclose(lab[:, 0], 22.0, atol=1.0), lab[:, 0])
+        self.assertTrue((lab[:, 2] < -3.0).all())
+        others = np.setdiff1d(np.arange(len(mesh.verts)), glass)
+        self.assertTrue(np.array_equal(out.vcolor[others], mesh.vcolor[others]))
+
+
+@unittest.skipUnless(HAVE_MCVOXEL, SKIP)
+class EvalAlignment(unittest.TestCase):
+    """real_trellis: the placement searches translations of +-ALIGN_REACH cells per axis."""
+
+    def test_eight_cell_shift_is_recovered(self):
+        from schemset.pairs import target_volume
+        from schemset.real_trellis import ALIGN_REACH, search_shift
+        self.assertGreaterEqual(ALIGN_REACH, 12)
+        h = house()
+        vol = target_volume(h["target_shape"], h["exterior"], h["ground_height"])
+        vol2 = vol.repeat(2, 0).repeat(2, 1).repeat(2, 2)
+        pad = ALIGN_REACH + 2
+        for d in ((8, 0, -3), (-8, 2, 8), (0, -5, 12)):
+            occ = np.zeros(tuple(n + 2 * pad for n in vol2.shape), dtype=bool)
+            occ[tuple(slice(pad + d[k], pad + d[k] + vol2.shape[k]) for k in range(3))] = vol2
+            shift, score = search_shift(occ, vol2, pad)
+            self.assertEqual(shift.tolist(), [-v for v in d], d)       # the correction to apply
+            self.assertAlmostEqual(score, 1.0)
+
+    def test_aligned_input_validates(self):
+        """align() end to end on a mesh turned by 90 degrees: the stored input is exactly
+        the window the search scored, and it validates with the existing tolerance."""
+        from schemset.meshify import meshify
+        from schemset.pairs import target_volume, validate_pair
+        from schemset.real_trellis import align
+        h = house()
+        mesh, _ = meshify(h["blocks"], h["palette"], h["exterior"], h["ground_height"])
+        t = np.radians(90.0)
+        rot = np.array([[np.cos(t), 0, np.sin(t)], [0, 1, 0], [-np.sin(t), 0, np.cos(t)]])
+        turned = mesh.transformed(rot, (0.0, 0.0, 0.0))
+        vol = target_volume(h["target_shape"], h["exterior"], h["ground_height"])
+        vm, info = align(turned, vol)
+        self.assertEqual(vm.solid.shape, tuple(2 * s for s in h["target_shape"].shape))
+        pair = {"input_occ": vm.solid.astype(np.uint8), "input_surface": vm.surface.astype(np.uint8),
+                "input_rgb": vm.rgb.astype(np.uint8), "target_shape": h["target_shape"],
+                "target_material": h["target_material"], "ground_height": h["ground_height"].astype(np.int16)}
+        failures, m = validate_pair(pair, h["exterior"])
+        self.assertEqual(failures, [])
+        self.assertGreater(m["iou"], 0.7)
+        off = ((info["yaw_deg"] % 90) + 45) % 90 - 45                   # the turn is undone,
+        self.assertLessEqual(abs(off), 8)                              # within the 1x yaw noise
+
+
+@unittest.skipUnless(HAVE_MCVOXEL, SKIP)
 class Determinism(unittest.TestCase):
 
     def test_same_seed_same_bytes(self):

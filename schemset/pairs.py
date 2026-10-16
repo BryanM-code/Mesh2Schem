@@ -62,7 +62,9 @@ from pathlib import Path
 
 import numpy as np
 
-VERSION = "pairs-1"
+VERSION = "pairs-2"               # 2: colour model re-fitted to TRELLIS on real photos, dark glass
+SEED_SALT = "pairs-1"             # seeds never change with the version: a colour-only change
+                                  # keeps every variant's geometry, voxel for voxel
 SCALE = 2                         # input cells per block (D16)
 VARIANTS = 4
 YAW_DEG = 5.0
@@ -75,21 +77,48 @@ SHIFT_SEARCH = 4                  # cells searched each way when measuring the f
 SHIFT_TOL = 1.0                   # cells: frame residual allowed per axis (or one bottleneck cell)
 PILOT_SEED = 20261014
 
+# Colour model (pairs-2). `synth.degrade`'s colour ranges were tuned for shaded Objaverse
+# textures; flat thumbnail colours came out about twice as bright and 1.5x as colourful as
+# TRELLIS on real photos. These override them for the pairs only (the parked synth pipeline
+# keeps its defaults); the geometric ranges are untouched. Per sample: exposure
+# (`tone_gain`, an sRGB gain, uniform in log), a directional sun (`ambient` = its floor),
+# hue drift, chroma scaled and compressed towards C* 8 (`chroma_gamma`: TRELLIS mutes strong
+# colours) and colour noise -- the model must be robust to brightness, not tuned to one
+# value. Fitted on a 60-build sample against TRELLIS on real photos (docs/pairs-v1.md).
+COLOUR = {"tone_gain": [0.37, 0.95], "tone_gain_log": True, "ambient": [0.5, 0.85],
+          "chroma": [0.95, 1.25], "chroma_gamma": 0.75, "hue_deg_sd": 4.0, "color_noise": [3.0, 7.0]}
+# Glass and panes read dark in photos (the room behind, reflections), not the thumbnail's
+# light blue. Per variant, CIELAB before exposure: lightness, a slight cool tint, per-window
+# jitter, and a share of windows catching the sky.
+GLASS = {"lum": [20.0, 38.0], "a": [-3.0, 1.0], "b": [-10.0, -3.0], "jitter": [2.0, 6.0],
+         "sky": [0.0, 0.25], "sky_lift": [8.0, 20.0]}
+# What the colour model is fitted to (TRELLIS on real photos, with some margin): percentiles
+# of the per-input mean L* and C* over the pairs (checked by `schemset.pairs_calibrate`).
+COLOUR_TARGET = {"lum_p10": [10.0, 14.0], "lum_p50": [20.0, 26.0], "lum_p90": [36.0, 45.0],
+                 "chroma_p50": [6.0, 8.0], "chroma_p90_max": 14.0, "glass_lum": [10.0, 30.0]}
+
 
 def variant_seed(build_id: str, variant: int) -> int:
-    """A stable 31-bit seed per (build, variant), independent of run order and machine."""
-    digest = hashlib.sha256(f"real-schems-v1/{VERSION}/{build_id}/{variant}".encode()).digest()
+    """A stable 31-bit seed per (build, variant), independent of run order, machine and
+    pairs version (`SEED_SALT`)."""
+    digest = hashlib.sha256(f"real-schems-v1/{SEED_SALT}/{build_id}/{variant}".encode()).digest()
     return int.from_bytes(digest[:4], "little") & 0x7FFFFFFF
 
 
-def settings() -> dict:
+def degrade_ranges(colour: dict = None) -> dict:
+    """`synth.config.PipelineConfig.degrade` with the pairs colour model on top."""
     from synth.config import PipelineConfig
+    ranges = dict(PipelineConfig().degrade)
+    ranges.update(COLOUR if colour is None else colour)
+    return ranges
 
+
+def settings() -> dict:
     from .meshify import MESH_VERSION
     return {"version": VERSION, "mesh_version": MESH_VERSION, "scale": SCALE, "variants": VARIANTS,
             "yaw_deg": YAW_DEG, "offset_blocks": OFFSET_BLOCKS, "smooth_sigma_blocks": SMOOTH_SIGMA_BLOCKS,
             "iou_min": IOU_MIN, "cover_min": COVER_MIN, "iou_flag": IOU_FLAG, "shift_tol_cells": SHIFT_TOL,
-            "degrade_ranges": PipelineConfig().degrade}
+            "seed_salt": SEED_SALT, "degrade_ranges": degrade_ranges(), "glass": GLASS}
 
 
 def settings_hash() -> str:
@@ -98,17 +127,51 @@ def settings_hash() -> str:
 
 # --------------------------------------------------------------------------- one variant
 
-def sample_variant(seed: int, smooth_sigma: float = None) -> dict:
-    """Everything random about one variant, drawn from its seed in a fixed order."""
+def sample_variant(seed: int, smooth_sigma: float = None, colour: dict = None, glass: dict = None) -> dict:
+    """Everything random about one variant, drawn from its seed in a fixed order. The
+    colour ranges change the values drawn, never the number or order of draws, so the
+    geometry of a variant does not depend on the colour model."""
     from dataclasses import asdict
-    from synth.config import PipelineConfig
     from synth.degrade import sample_params
     rng = np.random.default_rng(seed)
     yaw = float(rng.uniform(-YAW_DEG, YAW_DEG))
     offset = [float(v) for v in rng.uniform(-OFFSET_BLOCKS, OFFSET_BLOCKS, size=3)]
-    params = sample_params(rng, PipelineConfig().degrade)
+    ranges = degrade_ranges(colour)
+    params = sample_params(rng, ranges)
+    if ranges.get("tone_gain_log"):                 # exposure: uniform in log, not linear
+        lo, hi = ranges["tone_gain"]
+        params.tone_gain = float(np.exp(rng.uniform(np.log(lo), np.log(hi))))
+    params.chroma_gamma = float(ranges.get("chroma_gamma", 1.0))
     params.min_blur_units = SMOOTH_SIGMA_BLOCKS if smooth_sigma is None else float(smooth_sigma)
-    return {"seed": seed, "yaw_deg": yaw, "offset_blocks": offset, "degrade": asdict(params)}
+    g = GLASS if glass is None else glass
+    look = {k: float(rng.uniform(*g[k])) for k in ("lum", "a", "b", "jitter", "sky", "sky_lift")}
+    look["seed"] = int(rng.integers(0, 2 ** 31 - 1))
+    return {"seed": seed, "yaw_deg": yaw, "offset_blocks": offset, "degrade": asdict(params), "glass": look}
+
+
+def glass_look(mesh, look: dict):
+    """A copy of a meshify surface with its glass faces recoloured: CIELAB lightness
+    `lum` +- `jitter` per window quad, tint (`a`, `b`), and a share `sky` of the quads lifted
+    by `sky_lift` (a reflection of the sky). Other faces keep their colours."""
+    from mcvoxel.block_palette import lab_to_srgb
+    from mcvoxel.scene import KIND_GLASS
+    kinds = np.array([m.kind for m in mesh.materials], dtype=np.int64)[mesh.face_mat]
+    glass_verts = np.unique(mesh.faces[kinds == KIND_GLASS])
+    out = mesh.transformed(np.eye(3), np.zeros(3))
+    if not len(glass_verts) or mesh.vcolor is None:
+        return out
+    quads, inv = np.unique(glass_verts // 4, return_inverse=True)       # meshify: 4 vertices a quad
+    rng = np.random.default_rng(look["seed"])
+    lum = look["lum"] + rng.normal(0.0, look["jitter"], size=len(quads))
+    sky = rng.random(len(quads)) < look["sky"]
+    lum = np.clip(lum + sky * look["sky_lift"], 4.0, 80.0)
+    b = np.where(sky, look["b"] - 4.0, look["b"])
+    lab = np.stack([lum, np.full(len(quads), look["a"]), b], axis=1)
+    rgb = np.clip(lab_to_srgb(lab), 0, 255)
+    vcolor = np.array(mesh.vcolor, dtype=np.float64, copy=True)
+    vcolor[glass_verts] = rgb[inv.ravel()]
+    out.vcolor = vcolor
+    return out
 
 
 def place(mesh, yaw_deg: float, offset):
@@ -138,6 +201,8 @@ def make_input(clean, shape, variant: dict):
     from synth.degrade import DegradeParams, degrade
     info = {}
     t0 = time.time()
+    if variant.get("glass"):
+        clean = glass_look(clean, variant["glass"])
     moved = place(clean, variant["yaw_deg"], variant["offset_blocks"])
     deg, info["degrade"] = degrade(moved, DegradeParams(**variant["degrade"]))
     lo, hi = moved.bounds
@@ -456,6 +521,7 @@ def _one_variant(bid, k, clean, shape, arrays, target, out_dir, save_npz, measur
     var = sample_variant(seed)
     row = {"variant": k, "seed": seed, "yaw_deg": round(var["yaw_deg"], 4),
            "offset_blocks": [round(v, 4) for v in var["offset_blocks"]], "degrade": var["degrade"],
+           "glass": {k2: (round(v, 4) if isinstance(v, float) else v) for k2, v in var["glass"].items()},
            "file": f"synthetic/{bid}/v{k}.npz"}
     t0 = time.time()
     path = out_dir / f"v{k}.npz"

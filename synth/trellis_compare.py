@@ -76,8 +76,10 @@ def choose(run: Path, n: int, seed: int):
     return chosen
 
 
-def render_photo(scene, size=IMAGE_SIZE, yaw=VIEW_YAW, pitch=VIEW_PITCH, samples=3_000_000):
+def render_photo(scene, size=IMAGE_SIZE, yaw=VIEW_YAW, pitch=VIEW_PITCH, samples=3_000_000,
+                 light=(0.55, 0.45)):
     """A photo-like RGBA render of a clean source model: textured, lit, transparent ground.
+    `light` = (ambient, sun): colour x (ambient + sun * |normal . sun direction|).
 
     Point splatting at twice the size, then downsampled for antialiasing; the transparent
     background means the TRELLIS server does not run its own background removal (as with
@@ -95,7 +97,7 @@ def render_photo(scene, size=IMAGE_SIZE, yaw=VIEW_YAW, pitch=VIEW_PITCH, samples
     sun = np.array([0.35, 0.85, 0.4])
     sun /= np.linalg.norm(sun)
     lam = np.clip(np.abs(normals @ sun), 0, 1)
-    rgb = np.clip(cols * (0.55 + 0.45 * lam)[:, None], 0, 255).astype(np.uint8)
+    rgb = np.clip(cols * (light[0] + light[1] * lam)[:, None], 0, 255).astype(np.uint8)
     big = 2 * size
     span = max(float(np.ptp(sx)), float(np.ptp(sy))) or 1.0
     scale = (big * 0.86) / span

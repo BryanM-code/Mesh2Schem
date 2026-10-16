@@ -60,6 +60,7 @@ class DegradeParams:
     color_smooth: int = 2            # Laplacian passes over vertex colours
     seed: int = 0
     min_blur_units: float = 0.0      # blur sigma floor in scene units (0 = off; not sampled)
+    chroma_gamma: float = 1.0        # < 1 mutes strong colours more than weak ones (1 = off)
 
 
 def sample_params(rng: np.random.Generator, ranges: dict | None = None) -> DegradeParams:
@@ -165,7 +166,7 @@ def degrade(scene: SceneMesh, p: DegradeParams):
     sun /= np.linalg.norm(sun)
     shade = p.ambient + (1 - p.ambient) * np.clip(normals @ sun, 0, None)
     rgb = rgb * shade[:, None] * p.tone_gain
-    rgb = _hue_rotate(rgb, p.hue_deg, p.chroma)
+    rgb = _hue_rotate(rgb, p.hue_deg, p.chroma, p.chroma_gamma)
     rgb = rgb + rng.normal(0, p.color_noise, size=rgb.shape)
     if p.color_smooth:
         adj = mesh.vertex_adjacency_graph
@@ -209,12 +210,21 @@ def mesh_stats(verts, faces):
             "watertight": bool((counts == 2).all())}
 
 
-def _hue_rotate(rgb, deg, chroma):
+CHROMA_REF = 8.0                     # C* left unchanged by `chroma_gamma`
+
+
+def _hue_rotate(rgb, deg, chroma, gamma=1.0):
+    """Rotate hue by `deg` and scale chroma by `chroma`; `gamma` < 1 also compresses it
+    towards CHROMA_REF (C' = chroma * REF * (C / REF) ** gamma)."""
     lab = srgb_to_lab(np.clip(rgb, 0, 255))
     t = np.radians(deg)
     a, b = lab[..., 1], lab[..., 2]
-    lab[..., 1] = (a * np.cos(t) - b * np.sin(t)) * chroma
-    lab[..., 2] = (a * np.sin(t) + b * np.cos(t)) * chroma
+    scale = np.full(a.shape, float(chroma))
+    if gamma != 1.0:
+        c = np.hypot(a, b)
+        scale = scale * np.where(c > 1e-6, (np.maximum(c, 1e-6) / CHROMA_REF) ** (gamma - 1.0), 1.0)
+    lab[..., 1] = (a * np.cos(t) - b * np.sin(t)) * scale
+    lab[..., 2] = (a * np.sin(t) + b * np.cos(t)) * scale
     return lab_to_srgb(lab)
 
 
