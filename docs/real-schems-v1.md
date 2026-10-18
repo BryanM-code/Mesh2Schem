@@ -279,10 +279,13 @@ never makes air interior on its own.
 4. A leftover pocket in which at least 75% of the voxels see the outside along a straight
    horizontal line is an open gap, not a room, and is exterior. An example is the strip
    between a garden wall and the house under the eaves.
-5. **Depth under cover** (D22 amended, 2026-10-14). Exterior air more than 6 steps from
-   uncovered exterior air becomes interior. Steps are 6-connected and go through exterior
-   air only; uncovered air has no block anywhere above it in its column, and the grid's
-   boundary counts as uncovered. See [Depth cap under cover](#depth-cap-under-cover-d22-amended-2026-10-14).
+5. **Depth under cover** (D22 amended, 2026-10-14; measured from open air since normalize-5,
+   2026-10-15). Exterior air more than 6 steps from *open* exterior air becomes interior.
+   Steps are 6-connected and go through exterior air only. Open air is uncovered air (no
+   block anywhere above it in its column; the grid's boundary counts too) and covered air
+   that is open to the side and to the sky, such as the strip under a deep, tall eave. See
+   [Depth cap under cover](#depth-cap-under-cover-d22-amended-2026-10-14) and
+   [Depth from open air](#depth-from-open-air-normalize-5-2026-10-15-the-hotel-piran-fix).
 6. Shell is every block touching exterior air; interior is the rest, which is ignored and
    never deleted.
 
@@ -294,12 +297,14 @@ Deep covered air means air more than 3 blocks in from open sky; eaves and porche
 otherwise flag most houses. `deep_cover_capped` flags builds where the depth cap turned more
 than 200 air voxels interior; the count is `deep_cover_capped` in the record's mask stats.
 
-| | Result (normalize-4) |
+| | Result (normalize-5) |
 | --- | --- |
 | Interior fraction (interior / (interior + shell)) | median 0.83, p10 0.74, p90 0.90, min 0.30 |
-| Outside-visible but ignored (see below) | median 0.1%, p90 2.1%, max 14.2% |
-| `large_opening` | 11 builds |
-| `deep_cover_capped` | 108 builds; 3.12 M air voxels turned interior |
+| Outside-visible but ignored (see below) | median 0.1%, p90 2.4%, max 15.4% |
+| ... with no depth limit (`visible_ignored_any_depth`) | median 0.6%, p90 6.4%, max 24.3% |
+| `large_opening` | 21 builds |
+| `deep_cover_capped` | 92 builds |
+| `deep_visible_ignored` | 5 builds |
 
 ### Phase 3 fixes: before and after (2026-10-12)
 
@@ -440,6 +445,122 @@ Hollow / hall set, interior fraction:
 - Tall hotels and towers that the big-opening flood reached are capped too, though they were
   never `large_opening`. That is why 108 builds are flagged and only 69 were before.
 
+### Depth from open air (normalize-5, 2026-10-15): the Hotel Piran fix
+
+**Symptom.** Hotel Piran (`pmc-hotel-piran-piran-slovenia`, val) had lost three of its four
+facades in its target, its synthetic inputs and both real-TRELLIS photos.
+
+**Where the walls disappear**, stage by stage:
+
+| Stage | Hotel Piran's facades |
+| --- | --- |
+| `source/` (Sponge v2, one region, 56 × 64 × 79) | present |
+| `normalized/` blocks (the crop removed 5%, all landscape) | present |
+| `normalized/` masks and target | **ignored**: the air in front of three facades is interior, so the walls are not shell (shell 8,998 blocks) |
+| target render | missing |
+| synthetic inputs (meshify, then degrade) | replaced by dark opening caps 3 blocks in front of the facades |
+| smooth and blocky photos | the same caps |
+| TRELLIS raw, voxelised, aligned | TRELLIS rebuilds the caps |
+
+**Root cause.** The depth cap (normalize-4) measured depth under cover from *uncovered* air.
+Hotel Piran's roof overhangs its facades by 9 blocks, 45 blocks up. The air in front of the
+walls is covered (by the eave far above it) and 7 to 9 steps from uncovered air, so the cap
+made it interior and the walls lost their shell. Depth from uncovered air cannot tell the
+strip under a deep, tall overhang from the inside of a hall. The audit (`exposure`) used the
+same depth, so it reported 0.02% visible-but-ignored for Hotel Piran and could not see the
+loss.
+
+**Not the cause** (checked on all 317 builds):
+- Loading: every build has one region (no multi-region litematic). Dimensions match the
+  metadata for all 317 and block counts wherever the metadata has them (177). There are no
+  unknown legacy or non-vanilla blocks; the only warnings are "entities not read".
+- Crop: Hotel Piran's bounding box is unchanged and the crop removed only landscape.
+- Meshify: the blocks it does not draw are decor (grass, rails, buttons, torches, signs,
+  vines, banners): 0.9% of all shell blocks, and no wall.
+
+**Fix.** Depth is measured from *open* air (`interior.open_air`): uncovered air, plus
+covered air that has a straight horizontal line out to the grid's boundary and either sees
+the sky along a steep path (`sky_path`: rising at least `SKY_SLOPE` = 2 blocks per block
+across) or lies above such air in its column. The sideways line separates an eave strip from
+a hall, which is walled in at its own height. The steep path separates both from crawl
+spaces and low canopies, which see the sky only at their edge. Next to a tall opening the
+sky is now visible about half the opening's height in, and the cap counts from there.
+
+Alternatives measured on the whole dataset before choosing:
+
+| Open air also includes | Hotel Piran, visible but ignored (any depth) | Hall set | Verdict |
+| --- | ---: | --- | --- |
+| nothing (normalize-4) | 38.1% | 0.79–0.89 | the bug |
+| air seeing the sky steeply (45° or 63°) | 3.0–5.7% | the cathedral ab-13526 0.85 → 0.55 | reopens tall halls lit through big arches |
+| air with a horizontal line out | 0.6% | hangar 0.89 → 0.75, old tenement 0.79 → 0.62 | reopens every hall behind a big door |
+| both, as whole vertical runs (half lit) | 3.6% | 0.79–0.88 | misses eaves less than 4× as tall as deep |
+| both, lit air only (no 6 steps from it) | 6.1–12.5% | unchanged | leaves recesses behind the eave strip ignored |
+| **both, up the column (chosen)** | **2.8%** | **0.77–0.88** | |
+
+Before and after (normalize-4 → normalize-5, 317 builds):
+
+| | normalize-4 | normalize-5 |
+| --- | ---: | ---: |
+| Supervised (shell) blocks | 2,734,555 | 2,807,900 (+2.7%) |
+| Builds whose shell grew by more than 1% / 5% / 10% / 20% | | 99 / 34 / 14 / 6 |
+| Builds whose shell shrank | | 0 |
+| Visible but ignored, no depth limit: p50 / p90 / max | 1.25 / 9.0 / 38.1% | 0.6 / 6.4 / 24.3% |
+| Interior fraction p10 / p50 / p90 | 0.74 / 0.83 / 0.90 | 0.74 / 0.83 / 0.90 |
+| `deep_cover_capped` / `large_opening` | 108 / 11 | 92 / 21 |
+| Terrain floors restored under rooms | 136 builds | 37 builds keep a little less (air under eaves is no longer a room) |
+
+Hall set (interior fraction): baroque townhouse 0.85 → 0.85, brick tenement 0.30 → 0.30, old
+tenement 0.79 → 0.77, Adelaide hotel 0.89 → 0.86, factory hall 0.87 → 0.86, hangar 0.89 →
+0.88, cathedral ab-13526 0.85 → 0.77. The cathedral's outer walls under its projecting ring
+were hidden the same way as Hotel Piran's (now shell), and the bottom of its 17-block base
+arch is lit. Porch set: unchanged or better (Tudor any-depth visible-but-ignored 1.2 → 0.1%,
+Greek Revival 13.0 → 3.9%).
+
+Builds most affected (shell gain; visible but ignored with no depth limit, before → after):
+
+| Build | Split | Shell | Visible but ignored |
+| --- | --- | --- | --- |
+| pmc-hotel-piran-piran-slovenia | val | 8,998 → 14,635 (+63%) | 38.1 → 2.8% |
+| ab-11663 (a tower split by a covered cleft) | train | 42,167 → 60,940 (+45%) | 30.5 → 1.3% |
+| pmc-french-embassy-in-korea-seoul (walls under a roof plate) | train | 4,774 → 6,302 (+32%) | 33.8 → 8.9% |
+| ab-13526 (cathedral) | train | 11,639 → 14,055 (+21%) | 16.5 → 3.3% |
+| ab-3677 | train | 11,009 → 13,263 (+20%) | 16.9 → 0.0% |
+| pmc-villa-durango | train | 5,705 → 6,850 (+20%) | 13.9 → 7.0% |
+| ab-13254 | train | 13,425 → 15,982 (+19%) | 9.7 → 3.1% |
+| pmc-richelieu-contemporary | test | 3,136 → 3,708 (+18%) | 17.5 → 2.3% |
+| pmc-forest-fire-lookout-tower (the open stair frame) | train | 1,492 → 1,731 (+16%) | 9.0 → 0.5% |
+| pmc-greek-revival-plantation-house | train | 14,994 → 17,288 (+15%) | 13.0 → 3.9% |
+| pmc-red-clay-barn | train | 2,166 → 2,445 (+13%) | 5.9 → 3.7% |
+| pmc-warehouse-5752980 | train | 2,162 → 2,412 (+12%) | 3.3 → 2.0% |
+| pmc-old-warehouse | train | 7,107 → 7,914 (+11%) | 18.2 → 9.7% |
+| pmc-japanese-minimalistic-condo | train | 4,954 → 5,505 (+11%) | 9.4 → 1.0% |
+
+The 20 more with 5–10%: pmc-city-hall-council-building-of-kaiserthal-kaiserthal-project-,
+ab-8717, pmc-villa-shodhan-ahmedabad-by-le-corbusier, pmc-office-building-4034242,
+pmc-oxford-place, pmc-modern-white-beachlake-house, ab-5911, ab-4273, pmc-japanese-dusan,
+pmc-adelaide-hotel-toronto, pmc-traditional-mosque, pmc-modern-fuel-station-gas-station,
+ab-13627, pmc-warehouses-6539779, pmc-unite-d-habitation-nantes-reze-by-le-corbusier,
+pmc-late-1800s-brick-house, pmc-french-country-chateautmawok,
+pmc-national-museum-of-western-art-tokyo-by-le-corbusier-5946126,
+pmc-modern-american-craftsman-style-house, ab-3640. 65 more grew by 1–5%; 54 changed by
+less than 1%. Of the 25 real-TRELLIS evaluation builds, 13 changed (Hotel Piran +63%, the
+rest 0–5%); their photos were rendered again.
+
+**The audit can now see this.** `compute_masks` also records visible-but-ignored with no
+depth limit (`visible_ignored_any_depth`, every block a straight horizontal line from outside
+reaches) and flags `deep_visible_ignored` above 15%. It would have flagged Hotel Piran at
+38%. Five builds carry it now (ab-13627, pmc-japanese-dusan, pmc-farmhouse-free-download,
+pmc-modern-police-department-station-2, the Larsen-Nielsen panel house). Their remaining
+blocks sit 0–2 blocks above the ground (gravel, dirt, grass and planks under raised floors
+and platforms): crawl spaces, which the cap ignores by design (as ab-6057's).
+
+**Regression tests** (`tests/test_schemset_crop_rules.py`):
+- `test_facades_under_a_deep_tall_eave_stay_shell` has a 30-tall block under a 9-block eave.
+  Normalize-4 kept 0 of its 12 test facade cells as shell; normalize-5 keeps all 12.
+- `test_deep_low_canopy_is_still_capped` checks that the wall under a 3-tall, 12-deep canopy
+  stays ignored.
+- `test_open_fronted_hall` now counts depth from the lit band inside the opening.
+
 ### Duplicates
 
 `schemset.dedupe` compares every pair of normalized builds on their kept blocks:
@@ -478,12 +599,13 @@ vary in scale, sometimes on purpose. `schemset/storey.py` measures floor-to-floo
 Confidence: 115 high, 38 medium, 111 low (mostly one storey, measured floor to roof), 53
 unknown (317 builds, after the Phase 3 fixes; the table above is from the first run).
 
-### Flags (normalize-4)
+### Flags (normalize-5)
 
 | Flag | Meaning | Builds |
 | --- | --- | ---: |
-| `deep_cover_capped` | the depth cap turned more than 200 air voxels interior: halls, hollow shells, open ground floors, atria; review | 108 |
-| `large_opening` | more than 30% of the deep covered air is still exterior after the cap: two gas-station canopies, a train station, a barn, the Richelieu cliff house, the roofless brick tenement shell and five others | 11 |
+| `deep_cover_capped` | the depth cap turned more than 200 air voxels interior: halls, hollow shells, open ground floors, atria; review | 92 |
+| `large_opening` | more than 30% of the deep covered air is still exterior after the cap: canopies, station halls, barns, the Richelieu cliff house, the roofless brick tenement shell, and since normalize-5 the strips under deep, tall overhangs (ab-11663, the French embassy, the cathedral ab-13526) | 21 |
+| `deep_visible_ignored` | more than 15% of the blocks a straight horizontal line from outside reaches are ignored, at any depth: crawl spaces under raised floors | 5 |
 | `crop_aggressive` | the crop removed more than 50% of non-air blocks, usually a big terrain capture | 65 |
 | `multi_building` | more than one large separate mass remains (at least 15% of the biggest and 500 blocks): compounds, rows, campuses; all are kept | 10 |
 | `crop_kept_landscape` | soft blocks (plants, turf, water) are over 10% of what the crop kept | 8 |
@@ -509,11 +631,16 @@ gets one card:
 
 ### Limitations after the Phase 3 fixes
 
-- **Covered exterior air is supervised only 6 steps deep** (D22 amended). The middle of a
-  very large canopy, a long covered passage or a deep veranda beyond 6 is ignored, like a
-  hall interior.
-- **`large_opening` builds (11)** still have much exterior air under cover after the cap:
-  canopies, station halls, barns, and a facade shell whose hollow has no roof.
+- **Covered exterior air is supervised only 6 steps deep** (D22 amended), counted from open
+  air (normalize-5). The middle of a very large, low canopy, a long covered passage or a deep
+  veranda beyond that is ignored, like a hall interior. An eave strip counts as open only
+  where it sees the sky along a path at least 2 up per 1 across, so a deep eave less than
+  about twice as tall as it is deep is still capped at 6.
+- **`large_opening` builds (21; 11 under normalize-4)** still have much exterior air under
+  cover after the cap: canopies, station halls, barns, a facade shell whose hollow has no
+  roof, and since normalize-5 the strips under deep, tall overhangs.
+- **`deep_visible_ignored` builds (5)** have ignored blocks a horizontal line from outside
+  reaches, at any depth: crawl spaces under raised floors, left as they are.
 - **`ground_fallback` builds (4)** are houses built into a slope. With no ground, their
   buried parts are supervised, and rooms dug into the removed hill open up (the Richelieu
   cliff house).

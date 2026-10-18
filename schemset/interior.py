@@ -23,15 +23,25 @@ window only a narrow tube of a room has that line of sight.
 
 Depth under cover (D22 amended): covered exterior air is supervised only near the outside.
 After the steps above, each exterior air voxel's distance is measured -- 6-connected steps
-through exterior air only -- from *uncovered* exterior air (no block anywhere above it in
-its column; exterior air on the grid's boundary counts as uncovered too). Exterior air more
-than `COVER_DEPTH` steps away becomes interior, and the shell is taken afterwards, so
-blocks that touch only that deep air are ignored. Porches, verandas, loggias, eaves and
-jetties are shallower than that and stay exterior; the inside of an open hall, a hollow
-facade shell or an open ground floor beyond `COVER_DEPTH` does not. Being covered from
-above still never, on its own, makes air interior -- only depth under cover does.
+through exterior air only -- from *open* exterior air (`open_air`). Exterior air more than
+`COVER_DEPTH` steps away becomes interior, and the shell is taken afterwards, so blocks
+that touch only that deep air are ignored. Porches, verandas, loggias, eaves and jetties
+are shallower than that and stay exterior; the inside of an open hall, a hollow facade
+shell or an open ground floor beyond `COVER_DEPTH` does not. Being covered from above
+still never, on its own, makes air interior -- only depth under cover does.
 `COVER_DEPTH` = 6 is the smallest depth that keeps every porch, veranda and loggia of the
 review's porch set (docs/real-schems-v1.md, "Depth cap under cover").
+
+Open air is uncovered air (no block anywhere above it in its column; air on the grid's
+boundary counts too) and, since normalize-5, covered air that is open to the side and to
+the sky: it has a straight horizontal line to the grid's boundary (`sightline`), and it
+either sees the sky along a steep path (`sky_path`: rising at least `SKY_SLOPE` blocks per
+block across) or lies above such air in its column with that line too (the soffit band
+under the eave). That is the air under a deep, tall eave or overhang: the walls behind a
+9-block eave 45 blocks up (Hotel Piran) are facade, not the inside of a hall, though the
+eave covers them. The inside of a hall is walled in at its own height, so no sideways line
+reaches it, or it sees the sky only near a tall opening (within about half the opening's
+height), so the cap still holds there.
 
 Ground (from the crop): voxels at or below the ground height of their column count as
 solid for the flood, so a house whose floor was the grass plate does not flood from below,
@@ -48,9 +58,13 @@ depth cap. `deep_cover_capped`: the cap turned more than `CAPPED_FLAG` air voxel
 `exposure` audits any set of masks the same way, whatever rule made them: a block is
 *outside-visible* when it touches exterior air or *open covered air* -- covered air with a
 straight horizontal line of sight to the outside, within `COVER_DEPTH` steps (through
-above-ground air) of uncovered air, the same depth the rule uses; visible blocks that are
+above-ground air) of open air, the same depth the rule uses; visible blocks that are
 not shell are visible but ignored. Blocks below the ground height of their column that are not shell
-are below-ground ignored.
+are below-ground ignored. Because that audit uses the rule's own depth, it cannot see a
+facade the depth rule itself hides, so `compute_masks` also records it with no depth limit
+(`visible_ignored_any_depth`): every block a straight horizontal line from outside reaches.
+That figure also counts rooms seen through doorways and halls past the cap, so it is a
+review signal (`deep_visible_ignored` above `DEEP_VISIBLE_FLAG`), not a rule.
 """
 from __future__ import annotations
 
@@ -67,8 +81,10 @@ GAP_SIGHT = 0.75             # a pocket this much in sight of the outside is an 
 LARGE_OPENING = 0.30         # deep covered air that ends up exterior, above this share: flagged
 DEEP = 3                     # covered air further than this from open sky is "deep"
 LARGE_MIN = 50               # ...and at least this much of it is exterior
-COVER_DEPTH = 6              # covered exterior air further than this from uncovered air: interior
+COVER_DEPTH = 6              # covered exterior air further than this from open air: interior
+SKY_SLOPE = 2                # covered air seeing the sky along a path this steep is open
 CAPPED_FLAG = 200            # the cap turned more air than this interior: flagged
+DEEP_VISIBLE_FLAG = 0.15     # visible-but-ignored with no depth limit, above this: flagged
 
 
 @dataclass
@@ -143,14 +159,59 @@ def _boundary(shape) -> np.ndarray:
     return edge
 
 
-def near_uncovered(air: np.ndarray, solid: np.ndarray, depth: int) -> np.ndarray:
-    """Voxels of `air` within `depth` 6-connected steps, through `air` only, of uncovered
-    air (no block anywhere above it in its column, or on the grid's boundary)."""
+def _shift(layer: np.ndarray, dx: int, dz: int) -> np.ndarray:
+    """out[x, z] = layer[x + dx, z + dz]; outside the grid counts as open (True)."""
+    out = np.ones_like(layer)
+    X, Z = layer.shape
+    out[max(-dx, 0):X - max(dx, 0), max(-dz, 0):Z - max(dz, 0)] = \
+        layer[max(dx, 0):X - max(-dx, 0), max(dz, 0):Z - max(-dz, 0)]
+    return out
+
+
+def sky_path(air: np.ndarray, open_sky: np.ndarray, slope: int = SKY_SLOPE) -> np.ndarray:
+    """Voxels of `air` with a path through `air` to `open_sky` (or out of the grid) that
+    climbs at least `slope` blocks per block across, in one horizontal direction: moves of
+    one block up, or of `slope - 1` up, one across and one up. The moves are 6-connected, so
+    a path never squeezes between two blocks that meet at an edge."""
+    X, Y, Z = air.shape
+    lit = np.zeros_like(air)
+    for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        path = np.zeros_like(air)
+        for y in range(Y - 1, -1, -1):
+            up = path[:, y + 1, :] if y + 1 < Y else np.ones((X, Z), bool)
+            step = np.ones((X, Z), bool)
+            for k in range(1, min(slope, Y - y)):
+                step &= air[:, y + k, :]
+            if y + slope < Y:
+                step &= _shift(air[:, y + slope - 1, :], dx, dz) \
+                    & _shift(path[:, y + slope, :], dx, dz)
+            path[:, y, :] = air[:, y, :] & (open_sky[:, y, :] | up | step)
+        lit |= path
+    return lit
+
+
+def open_air(air: np.ndarray, solid: np.ndarray) -> np.ndarray:
+    """Air that depth under cover is measured from (see the module docstring): uncovered air
+    and air on the grid's boundary, plus covered air with a straight horizontal line to the
+    boundary that sees the sky along a steep path, or lies above such air in its column."""
     roofed = np.maximum.accumulate(solid[:, ::-1, :], axis=1)[:, ::-1, :]
     seeds = air & (~roofed | _boundary(air.shape))
+    side = air & sightline(air)
+    if not side.any():
+        return seeds
+    lit = sky_path(air, air & ~roofed) & side
+    for y in range(1, air.shape[1]):                 # up the column, while the line holds
+        lit[:, y, :] |= lit[:, y - 1, :] & side[:, y, :]
+    return seeds | lit
+
+
+def near_open(air: np.ndarray, solid: np.ndarray, depth: int) -> np.ndarray:
+    """Voxels of `air` within `depth` 6-connected steps, through `air` only, of open air
+    (`open_air`)."""
+    seeds = open_air(air, solid)
     if not seeds.any() or depth == 0:
         return seeds
-    # depth < 0: no limit (every voxel of `air` connected to uncovered air)
+    # depth < 0: no limit (every voxel of `air` connected to open air)
     return ndimage.binary_dilation(seeds, structure=SIX, iterations=max(depth, 0), mask=air)
 
 
@@ -161,7 +222,7 @@ def exposure(solid, shell, exterior, height, cover_depth=None) -> tuple[dict, di
     above_air = ~solid & ~ground
     roofed = np.maximum.accumulate(solid[:, ::-1, :], axis=1)[:, ::-1, :]
     covered = above_air & roofed
-    open_covered = covered & sightline(above_air) & near_uncovered(above_air, solid, depth)
+    open_covered = covered & sightline(above_air) & near_open(above_air, solid, depth)
     visible = solid & _touches(exterior | open_covered)
     visible_ignored = visible & ~shell
     Y = solid.shape[1]
@@ -188,7 +249,7 @@ def compute_masks(blocks: np.ndarray, height=None) -> Masks:
     ground = ground_mask(blocks.shape, height)
     air = ~(solid | ground)
     reached = exterior_air(air)
-    exterior = near_uncovered(reached, solid, COVER_DEPTH)       # the depth cap
+    exterior = near_open(reached, solid, COVER_DEPTH)            # the depth cap
     capped = int((reached & ~exterior).sum())
     shell = solid & _touches(exterior)
     interior = ~(exterior | shell)
@@ -228,9 +289,14 @@ def compute_masks(blocks: np.ndarray, height=None) -> Masks:
     }
     audit, _ = exposure(solid, shell, exterior, height)
     stats.update(audit)
+    any_depth, _ = exposure(solid, shell, exterior, height, cover_depth=-1)
+    stats["visible_ignored_any_depth"] = any_depth["visible_ignored"]
+    stats["visible_ignored_any_depth_fraction"] = any_depth["visible_ignored_fraction"]
     flags = []
     if deep_ext >= LARGE_MIN and deep_ext > LARGE_OPENING * deep_n:
         flags.append("large_opening")
     if capped > CAPPED_FLAG:
         flags.append("deep_cover_capped")
+    if any_depth["visible_ignored_fraction"] > DEEP_VISIBLE_FLAG:
+        flags.append("deep_visible_ignored")
     return Masks(shell, exterior, interior, stats, flags)

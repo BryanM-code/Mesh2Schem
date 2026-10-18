@@ -159,7 +159,9 @@ class DepthUnderCover(unittest.TestCase):
         self.assertNotIn("deep_cover_capped", m.flags)
 
     def test_open_fronted_hall(self):
-        from schemset.interior import COVER_DEPTH
+        """Depth counts from open air (normalize-5): the uncovered air outside, and the band
+        just inside the 6-tall opening that sees the sky steeply -- 6 // SKY_SLOPE deep."""
+        from schemset.interior import COVER_DEPTH, SKY_SLOPE
         g = plate()
         box(g, 10, 24, 2, 9, 12, 23)                      # walls on all sides...
         g[11:24, 3:9, 23] = 0                            # ...but the +z front is open
@@ -167,8 +169,37 @@ class DepthUnderCover(unittest.TestCase):
         crop, m = run(g)                                  # depth: z 23 (1) back to z 13 (11)
         for z in range(13, 24):
             k = 24 - z
-            self.assertEqual(bool(m.exterior[at(crop, 17, 5, z)]), k <= COVER_DEPTH, k)
+            self.assertEqual(bool(m.exterior[at(crop, 17, 5, z)]),
+                             k <= COVER_DEPTH + 6 // SKY_SLOPE, k)
         self.assertFalse(m.shell[at(crop, 17, 5, 12)])      # the back wall: ignored
+
+    def test_facades_under_a_deep_tall_eave_stay_shell(self):
+        """Hotel Piran (normalize-4 bug): a 9-block eave 30 blocks up hid three facades. The
+        air under it is open to the side and sees the sky, so depth counts from there."""
+        g = plate(x=48, y=40, z=48)
+        box(g, 16, 31, 2, 32, 16, 31, roof=PLANKS)          # a 30-tall closed block...
+        g[7:41, 32, 7:41] = BRICKS                       # ...under a 9-block eave all round
+        crop, m = run(g)
+        for x, z in ((15, 24), (32, 24), (24, 15), (24, 32)):   # air in front of each side
+            for y in (4, 16, 31):
+                self.assertTrue(m.exterior[at(crop, x, y, z)], (x, y, z))
+        for x, z in ((16, 24), (31, 24), (24, 16), (24, 31)):   # every facade is shell
+            for y in (4, 16, 31):
+                self.assertTrue(m.shell[at(crop, x, y, z)], (x, y, z))
+        self.assertTrue(m.shell[at(crop, 12, 32, 24)])      # and the eave's underside
+        self.assertNotIn("deep_visible_ignored", m.flags)
+
+    def test_deep_low_canopy_is_still_capped(self):
+        """The cap still holds under a low cover: a 3-tall canopy 12 deep sees the sky only
+        near its edge, so the wall at its back is ignored."""
+        from schemset.interior import COVER_DEPTH
+        g = plate(x=48, y=24, z=40)
+        box(g, 10, 36, 2, 12, 8, 14)                      # a building...
+        g[10:37, 5, 15:27] = BRICKS                      # ...with a canopy 12 deep, 3 up
+        crop, m = run(g)
+        self.assertTrue(m.exterior[at(crop, 20, 3, 26 - COVER_DEPTH + 1)])
+        self.assertFalse(m.exterior[at(crop, 20, 3, 16)])
+        self.assertFalse(m.shell[at(crop, 20, 3, 14)])      # the wall under the canopy
 
     def test_hollow_shell_with_a_beam(self):
         g = plate(x=40, y=24, z=40)

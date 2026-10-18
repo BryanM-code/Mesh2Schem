@@ -12,8 +12,8 @@ over to the new pairs.
 | Objaverse synth path | `synth/select.py`, `synth/fetch.py`, `synth/objaverse_index.py`, `synth/run.py` | **PARKED** (D13): kept, possible pretraining source |
 | Grammar houses | `house_grammar.py`, `gen_houses.py`, `house_params.py` | **PARKED** |
 | The 16 synthetic-house builds in `data/builds/` | — | **EXCLUDED** from any real-build dataset |
-| TRELLIS-like degradation, real-TRELLIS comparison, real evaluation | `synth/degrade.py`, `synth/trellis_compare.py`, `synth/real_eval.py` | **ACTIVE**, reused. For Phase 4, three optional parameters were added, each defaulting to unchanged behaviour: `degrade`'s blur floor `min_blur_units` (default 0) and chroma compression `chroma_gamma` (default 1), and `render_photo`'s `light` |
-| Schematic pairs (Phase 4, D16) | `schemset/meshify.py`, `schemset/pairs.py`, `schemset/pairs_calibrate.py`, `schemset/real_trellis.py`, `schemset/pairs_gallery.py` | **ACTIVE**: [pairs-v1.md](pairs-v1.md) |
+| TRELLIS-like degradation, real-TRELLIS comparison, real evaluation | `synth/degrade.py`, `synth/trellis_compare.py`, `synth/real_eval.py` | **ACTIVE**, reused. For Phase 4, optional parameters were added, each defaulting to unchanged behaviour: `degrade`'s blur floor `min_blur_units` (default 0) and chroma compression `chroma_gamma` (default 1), and `render_photo`'s `light`; in the Phase 4 follow-up (pairs-3), `degrade`'s TRELLIS texture artefacts `blotch`, `warp_units`, `tint_ab`, `cast_a` / `cast_b` and `roof_darken`, and `target_lum` (TRELLIS's own exposure: L\* scaled to a drawn mean, chroma kept), all 0 = off. They draw from their own random stream, so a degraded mesh's geometry is the same with or without them. |
+| Schematic pairs (Phase 4, D16) | `schemset/meshify.py`, `schemset/pairs.py`, `schemset/detail.py`, `schemset/pairs_calibrate.py`, `schemset/real_trellis.py`, `schemset/real_photo.py`, `schemset/pairs_gallery.py` | **ACTIVE**: [pairs-v1.md](pairs-v1.md) |
 | Shared voxel core | Real2Minecraft `mcvoxel/` | **ACTIVE**, reused |
 | Rule-based building mode | Real2Minecraft `building/` | **ACTIVE** as the baseline (D18) |
 

@@ -15,7 +15,9 @@ For every normalized build of split train / val / test ("excluded" never):
     degrade   `synth.degrade.degrade` with `sample_params` (the calibrated TRELLIS-like
               ranges of `synth.config.PipelineConfig.degrade`): a resolution bottleneck
               relative to the build's size, blur, surface noise, holes, floaters, baked dark
-              colour, a hallucinated back side
+              colour, a hallucinated back side; the colour model on top (`COLOUR`, `GLASS`,
+              `ARTEFACTS`: exposure, a lit front and a dark unseen side, dark roofs, blotches,
+              smears, regional hue drift), fitted to TRELLIS on real photos
     smooth    the bottleneck blur is at least `SMOOTH_SIGMA_BLOCKS` block (sigma; FWHM >= 1
               block): the domain-gap guard -- Minecraft's one-block stair steps are blockier
               than what TRELLIS makes of real buildings (docs/pairs-v1.md,
@@ -28,7 +30,8 @@ For every normalized build of split train / val / test ("excluded" never):
               input must overlay the clean surface placed by the same yaw and offset within
               max(SHIFT_TOL, one bottleneck cell). Per build, `frame_identity` checks the
               clean surface's bounds against the shell. A failure rejects the pair with its
-              reason; nothing is dropped silently
+              reason; nothing is dropped silently. The same reference scores the detail
+              metric (`schemset.detail`)
     write     one compressed npz per (build, variant), deterministic bytes
 
 Writes, all under <dataset>/pairs/ (never inside source/):
@@ -62,7 +65,10 @@ from pathlib import Path
 
 import numpy as np
 
-VERSION = "pairs-2"               # 2: colour model re-fitted to TRELLIS on real photos, dark glass
+VERSION = "pairs-3"               # 3: normalize-5 targets; colour model with TRELLIS's own exposure,
+                                  #    a lit front, a dark unseen side and roofs, texture artefacts;
+                                  #    detail metric
+                                  # 2: colour model re-fitted to TRELLIS on real photos, dark glass
 SEED_SALT = "pairs-1"             # seeds never change with the version: a colour-only change
                                   # keeps every variant's geometry, voxel for voxel
 SCALE = 2                         # input cells per block (D16)
@@ -77,21 +83,43 @@ SHIFT_SEARCH = 4                  # cells searched each way when measuring the f
 SHIFT_TOL = 1.0                   # cells: frame residual allowed per axis (or one bottleneck cell)
 PILOT_SEED = 20261014
 
-# Colour model (pairs-2). `synth.degrade`'s colour ranges were tuned for shaded Objaverse
+# Colour model (pairs-3). `synth.degrade`'s colour ranges were tuned for shaded Objaverse
 # textures; flat thumbnail colours came out about twice as bright and 1.5x as colourful as
 # TRELLIS on real photos. These override them for the pairs only (the parked synth pipeline
-# keeps its defaults); the geometric ranges are untouched. Per sample: exposure
-# (`tone_gain`, an sRGB gain, uniform in log), a directional sun (`ambient` = its floor),
-# hue drift, chroma scaled and compressed towards C* 8 (`chroma_gamma`: TRELLIS mutes strong
-# colours) and colour noise -- the model must be robust to brightness, not tuned to one
-# value. Fitted on a 60-build sample against TRELLIS on real photos (docs/pairs-v1.md).
-COLOUR = {"tone_gain": [0.37, 0.95], "tone_gain_log": True, "ambient": [0.5, 0.85],
-          "chroma": [0.95, 1.25], "chroma_gamma": 0.75, "hue_deg_sd": 4.0, "color_noise": [3.0, 7.0]}
+# keeps its defaults); the geometric ranges are untouched. Per sample: a directional sun
+# (`ambient` = its floor), hue drift, chroma scaled and compressed towards C* 8
+# (`chroma_gamma`: TRELLIS mutes strong colours) and colour noise. TRELLIS on a real photo
+# bakes the side it sees bright and the sides it does not see near-black (L* about 41
+# against 13), so the unseen side is darkened (`back_darken`). The exposure is not a gain on
+# the build's colours (`tone_gain` stays 1, drawn only to keep the draw order): TRELLIS sets
+# its own, so each variant draws the mean L* it ends at (`ARTEFACTS["target_lum"]`) -- the
+# model must be robust to brightness, not tuned to one value. Fitted on 40 builds x 4
+# variants against TRELLIS on real photos (docs/pairs-v1.md).
+COLOUR = {"tone_gain": [1.0, 1.0], "tone_gain_log": True, "ambient": [0.5, 0.85],
+          "chroma": [1.0, 1.25], "chroma_gamma": 0.8, "hue_deg_sd": 4.0, "color_noise": [2.5, 6.0],
+          "back_darken": [0.2, 0.55]}
 # Glass and panes read dark in photos (the room behind, reflections), not the thumbnail's
 # light blue. Per variant, CIELAB before exposure: lightness, a slight cool tint, per-window
 # jitter, and a share of windows catching the sky.
 GLASS = {"lum": [20.0, 38.0], "a": [-3.0, 1.0], "b": [-10.0, -3.0], "jitter": [2.0, 6.0],
          "sky": [0.0, 0.25], "sky_lift": [8.0, 20.0]}
+# What TRELLIS does to colour that the model above lacks (pairs-3; {} = off), drawn from a
+# stream of their own. Its exposure (`target_lum`, [quantile, L*] points): the variant's
+# mean L* is drawn from them and the colours' L* scaled to it, chroma kept -- TRELLIS's
+# lightness does not follow the photo's, and its colourfulness does not follow its lightness.
+# Lighter and darker blotches a block or two across (`blotch`, sd of a lightness factor),
+# colours read from a slowly wandering offset on half the variants (`warp_units`: wavy
+# streaks and smears on busy facades), regional hue drift (`tint_ab`, sd of a slowly varying
+# a* / b* shift), dark roofs (`roof_darken`) and a white-balance cast (`cast_sd`, off:
+# TRELLIS did not carry the sunset photo's warmth through). Fitted against TRELLIS on real
+# photos and on the renders (docs/pairs-v1.md).
+ARTEFACTS = {"blotch": [0.08, 0.2], "blotch_units": [1.0, 2.5], "warp_units": [0.5, 2.0], "warp_prob": 0.5,
+             "warp_wavelength_units": [6.0, 16.0], "cast_sd": 0.0, "tint_ab": [0.0, 3.0],
+             "tint_units": [8.0, 20.0], "roof_darken": [0.3, 0.55],
+             "target_lum": [[0.0, 8.0], [0.1, 12.0], [0.5, 22.0], [0.9, 38.0], [1.0, 48.0]]}
+# One fixed look of the same kind: the real-TRELLIS photos' glass and the detail metric's
+# reference (`schemset.detail`), so every input is compared with the same colours.
+REFERENCE_GLASS = {"lum": 30.0, "a": -1.0, "b": -6.0, "jitter": 4.0, "sky": 0.15, "sky_lift": 15.0, "seed": 0}
 # What the colour model is fitted to (TRELLIS on real photos, with some margin): percentiles
 # of the per-input mean L* and C* over the pairs (checked by `schemset.pairs_calibrate`).
 COLOUR_TARGET = {"lum_p10": [10.0, 14.0], "lum_p50": [20.0, 26.0], "lum_p90": [36.0, 45.0],
@@ -118,7 +146,8 @@ def settings() -> dict:
     return {"version": VERSION, "mesh_version": MESH_VERSION, "scale": SCALE, "variants": VARIANTS,
             "yaw_deg": YAW_DEG, "offset_blocks": OFFSET_BLOCKS, "smooth_sigma_blocks": SMOOTH_SIGMA_BLOCKS,
             "iou_min": IOU_MIN, "cover_min": COVER_MIN, "iou_flag": IOU_FLAG, "shift_tol_cells": SHIFT_TOL,
-            "seed_salt": SEED_SALT, "degrade_ranges": degrade_ranges(), "glass": GLASS}
+            "seed_salt": SEED_SALT, "degrade_ranges": degrade_ranges(), "glass": GLASS,
+            "artefacts": ARTEFACTS}
 
 
 def settings_hash() -> str:
@@ -127,10 +156,12 @@ def settings_hash() -> str:
 
 # --------------------------------------------------------------------------- one variant
 
-def sample_variant(seed: int, smooth_sigma: float = None, colour: dict = None, glass: dict = None) -> dict:
+def sample_variant(seed: int, smooth_sigma: float = None, colour: dict = None, glass: dict = None,
+                   artefacts: dict = None) -> dict:
     """Everything random about one variant, drawn from its seed in a fixed order. The
     colour ranges change the values drawn, never the number or order of draws, so the
-    geometry of a variant does not depend on the colour model."""
+    geometry of a variant does not depend on the colour model. The texture artefacts
+    (`ARTEFACTS`) come from a stream of their own."""
     from dataclasses import asdict
     from synth.degrade import sample_params
     rng = np.random.default_rng(seed)
@@ -146,6 +177,20 @@ def sample_variant(seed: int, smooth_sigma: float = None, colour: dict = None, g
     g = GLASS if glass is None else glass
     look = {k: float(rng.uniform(*g[k])) for k in ("lum", "a", "b", "jitter", "sky", "sky_lift")}
     look["seed"] = int(rng.integers(0, 2 ** 31 - 1))
+    a = ARTEFACTS if artefacts is None else artefacts
+    if a:                                           # own stream: nothing above moves
+        art = np.random.default_rng([seed, 0xA7])
+        params.blotch = float(art.uniform(*a["blotch"]))
+        params.blotch_units = float(art.uniform(*a["blotch_units"]))
+        params.warp_units = float(art.uniform(*a["warp_units"])) if art.random() < a["warp_prob"] else 0.0
+        params.warp_wavelength_units = float(art.uniform(*a["warp_wavelength_units"]))
+        params.cast_a, params.cast_b = (float(x) for x in art.normal(0.0, a["cast_sd"], size=2))
+        params.tint_ab = float(art.uniform(*a.get("tint_ab", (0.0, 0.0))))
+        params.tint_units = float(art.uniform(*a.get("tint_units", (12.0, 12.0))))
+        params.roof_darken = float(art.uniform(*a.get("roof_darken", (0.0, 0.0))))
+        if a.get("target_lum"):                     # [[quantile, L*], ...]: the mean L* to reach
+            q, lum = zip(*a["target_lum"])
+            params.target_lum = float(np.interp(art.random(), q, lum))
     return {"seed": seed, "yaw_deg": yaw, "offset_blocks": offset, "degrade": asdict(params), "glass": look}
 
 
@@ -196,11 +241,16 @@ def voxelize_input(mesh, shape, colors: bool = True):
 
 def make_input(clean, shape, variant: dict):
     """(VoxelModel at 2x in the target frame, degraded SceneMesh, info, reference) for one
-    variant. `reference` is the clean surface placed the same way (yaw, offset) and voxelised
-    the same way without degradation: what the frame check compares the input with."""
+    variant. `reference` (a VoxelModel with colours) is the clean surface placed the same way
+    (yaw, offset) and voxelised the same way without degradation, its glass in
+    `REFERENCE_GLASS`: what the frame check and the detail metric (`schemset.detail`)
+    compare the input with."""
     from synth.degrade import DegradeParams, degrade
+
+    from .detail import reference_model
     info = {}
     t0 = time.time()
+    reference = reference_model(clean, shape, variant["yaw_deg"], variant["offset_blocks"])
     if variant.get("glass"):
         clean = glass_look(clean, variant["glass"])
     moved = place(clean, variant["yaw_deg"], variant["offset_blocks"])
@@ -212,7 +262,6 @@ def make_input(clean, shape, variant: dict):
     vm = voxelize_input(deg, shape)
     info["voxelize"] = {k: v for k, v in vm.info.items() if not isinstance(v, (dict, list))}
     info["t_voxelize"] = round(time.time() - t1, 2)
-    reference = voxelize_input(moved, shape, colors=False).solid
     return vm, deg, info, reference
 
 
@@ -542,11 +591,14 @@ def _one_variant(bid, k, clean, shape, arrays, target, out_dir, save_npz, measur
     # Degradation moves surfaces by up to about one bottleneck cell: the frame tolerance
     # is that, or SHIFT_TOL, whichever is larger.
     tol = max(SHIFT_TOL, SCALE * info["bottleneck_cell_blocks"])
-    failures, metrics = validate_pair(pair, arrays["exterior"], reference, tol=tol)
+    failures, metrics = validate_pair(pair, arrays["exterior"], reference.solid, tol=tol)
     if not finite:
         failures.append("nan_inf:degraded_mesh")
     row["validation"] = {"failures": failures, **metrics}
     row["stats"] = input_stats(vm)
+    from .detail import colour_cast, detail_of
+    row["stats"].update(detail_of(vm, reference))
+    row["stats"].update(colour_cast(vm, reference))
     if measure_mesh:
         from synth.blockiness import blockiness
         row["stats"]["normal_roughness"] = normal_roughness(deg.verts, deg.faces)
@@ -639,7 +691,25 @@ def summarize(records: list) -> dict:
                for r, v in rows if v["status"] == "ok" and "low_iou" in v.get("validation", {}).get("flags", [])]
     out["flagged_low_iou"] = {"pairs": len(flagged), "builds": sorted({f[0] for f in flagged}),
                               "rows": [{"id": b, "variant": k, "iou": i, "coverage": c} for b, k, i, c in flagged]}
+    subsets = metric_subsets([dict(id=r["id"], split=r["split"], **v) for r, v in rows])
+    out["metric_subsets"] = {split: {"counts": s["counts"], "low_iou": s["low_iou"]} for split, s in subsets.items()}
     return out
+
+
+def metric_subsets(pairs: list) -> dict:
+    """What Phase 5 reports every metric on, per split: `all` usable pairs, and `without_low_iou`
+    (the `low_iou`-flagged pairs left out). The flagged pairs stay in training; reporting
+    both shows whether they help or hurt. Pair keys are "<id>/v<k>"."""
+    out = {}
+    for p in pairs:
+        if p.get("status") != "ok":
+            continue
+        s = out.setdefault(p["split"], {"all": [], "without_low_iou": [], "low_iou": []})
+        key = f"{p['id']}/v{p['variant']}"
+        s["all"].append(key)
+        low = "low_iou" in (p.get("validation") or {}).get("flags", [])
+        s["low_iou" if low else "without_low_iou"].append(key)
+    return {split: {**v, "counts": {k: len(x) for k, x in v.items()}} for split, v in sorted(out.items())}
 
 
 def main(argv=None) -> int:

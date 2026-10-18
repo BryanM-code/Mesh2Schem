@@ -2,11 +2,15 @@
 """Phase 4 domain-gap guard: synthetic inputs vs real TRELLIS output, same statistics.
 
 Usage:  python -m schemset.pairs_calibrate --dataset data/real-schems-v1
-                                           [--trellis ../Real2Minecraft/outputs/trellis]
-                                           [--sizes 36 57 87] [--refresh]
+                                           [--trellis <folder of .glb>] [--sizes 36 57 87]
+                                           [--refresh] [--freeze-reference <folder>]
 
-Reference: the cached TRELLIS meshes in Real2Minecraft `outputs/trellis/` (photos and AI
-images of real houses and towers, plus a car and a tree, which `buildings` leaves out).
+Reference: the TRELLIS meshes cached in Real2Minecraft `outputs/trellis/` (photos and AI
+images of real houses and towers, plus a car and a tree, which `buildings` leaves out),
+frozen once with `--freeze-reference ../Real2Minecraft/outputs/trellis` into
+<dataset>/pairs/trellis_reference/ (meshes/ + manifest.json with each file's sha256). The
+calibration reads that copy and stops if a mesh changed, went missing or was added, so the
+targets cannot drift when the app writes new meshes to its outputs folder.
 Each is yaw-aligned to its facades (`mcvoxel.yaw_align`, as building mode does), stood on
 y = 0, scaled to each of `--sizes` blocks on its longest axis (default: the dataset's p25 /
 p50 / p75 longest extent), and voxelised at 2 cells per block exactly as the synthetic
@@ -52,6 +56,7 @@ EVAL_SETS = {"eval_smooth": "real_trellis_smooth", "eval_blocky": "real_trellis"
 REPORT = ("stair45", "normal_roughness", "lattice16", "axis_area", "fill_gain", "rough3",
           "lum", "chroma", "nbr_de")
 NOT_BUILDINGS = ("Car_", "Tree_")
+REFERENCE_DIR = "trellis_reference"          # <dataset>/pairs/: meshes/ + manifest.json
 
 
 def trellis_row(glb: Path, size: int) -> dict:
@@ -89,10 +94,67 @@ def _job(args):
     return row
 
 
+def _sha256(path: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def freeze_reference(src: Path, dataset: Path) -> Path:
+    """Copy the reference meshes (`*.glb` in `src`) to <dataset>/pairs/trellis_reference/
+    meshes/ and record each one's sha256 in manifest.json beside them, so the calibration
+    targets cannot change without notice. Returns the meshes folder."""
+    import shutil
+    out = dataset / "pairs" / REFERENCE_DIR
+    meshes = out / "meshes"
+    meshes.mkdir(parents=True, exist_ok=True)
+    files = []
+    for glb in sorted(Path(src).glob("*.glb")):
+        dst = meshes / glb.name
+        shutil.copy2(glb, dst)
+        files.append({"name": glb.name, "sha256": _sha256(dst), "bytes": dst.stat().st_size,
+                      "building": not glb.name.startswith(NOT_BUILDINGS)})
+    manifest = {"source": str(Path(src).resolve()), "frozen": time.strftime("%Y-%m-%d"),
+                "files": files, "set_sha256": _set_digest(files)}
+    (out / "manifest.json").write_text(json.dumps(manifest, indent=1), encoding="utf-8")
+    return meshes
+
+
+def _set_digest(files) -> str:
+    import hashlib
+    return hashlib.sha256("\n".join(f"{f['name']} {f['sha256']}" for f in
+                                    sorted(files, key=lambda f: f["name"])).encode()).hexdigest()
+
+
+def check_reference(folder: Path) -> str | None:
+    """The frozen reference must be exactly what its manifest lists: every mesh present
+    with its checksum, and nothing else. Returns the set digest, or None for a folder
+    without a manifest (an unfrozen reference); raises on any difference."""
+    path = Path(folder).parent / "manifest.json"
+    if not path.is_file():
+        return None
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    listed = {f["name"]: f["sha256"] for f in manifest["files"]}
+    present = {p.name for p in Path(folder).glob("*.glb")}
+    problems = [f"missing: {n}" for n in sorted(set(listed) - present)]
+    problems += [f"not in the manifest: {n}" for n in sorted(present - set(listed))]
+    problems += [f"changed: {n}" for n in sorted(set(listed) & present)
+                 if _sha256(Path(folder) / n) != listed[n]]
+    if problems:
+        raise SystemExit("the TRELLIS reference differs from its manifest "
+                         f"({path}):\n  " + "\n  ".join(problems))
+    return manifest["set_sha256"]
+
+
 def trellis_reference(folder: Path, sizes, cache: Path, refresh: bool = False, workers: int = 1) -> list:
+    digest = check_reference(folder)
     if cache.is_file() and not refresh:
         data = json.loads(cache.read_text(encoding="utf-8"))
-        if data.get("sizes") == list(sizes) and data.get("folder") == str(folder):
+        if data.get("sizes") == list(sizes) and data.get("folder") == str(folder) \
+                and data.get("set_sha256") == digest:
             return data["rows"]
     jobs = [(str(glb), size) for glb in sorted(folder.glob("*.glb")) for size in sizes]
     if workers > 1:
@@ -108,8 +170,8 @@ def trellis_reference(folder: Path, sizes, cache: Path, refresh: bool = False, w
             continue
         rows.append(row)
     print(f"  {len(rows)} reference rows from {len({r['name'] for r in rows})} meshes", flush=True)
-    cache.write_text(json.dumps({"folder": str(folder), "sizes": list(sizes), "rows": rows}, indent=1),
-                     encoding="utf-8")
+    cache.write_text(json.dumps({"folder": str(folder), "sizes": list(sizes), "set_sha256": digest,
+                                 "rows": rows}, indent=1), encoding="utf-8")
     return rows
 
 
@@ -240,7 +302,10 @@ def print_table(res: dict) -> None:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--dataset", type=Path, required=True)
-    ap.add_argument("--trellis", type=Path, default=Path("../Real2Minecraft/outputs/trellis"))
+    ap.add_argument("--trellis", type=Path, default=None,
+                    help="reference meshes (default: the frozen copy, pairs/trellis_reference/meshes)")
+    ap.add_argument("--freeze-reference", type=Path, metavar="SRC",
+                    help="copy SRC/*.glb into pairs/trellis_reference/ with checksums, then exit")
     ap.add_argument("--sizes", type=int, nargs="*", default=[36, 57, 87])
     ap.add_argument("--refresh", action="store_true")
     ap.add_argument("--label", default="")
@@ -249,7 +314,15 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    res = compare(args.dataset.resolve(), args.trellis.resolve(), args.sizes, args.refresh, args.label,
+    dataset = args.dataset.resolve()
+    if args.freeze_reference:
+        meshes = freeze_reference(args.freeze_reference, dataset)
+        print(f"reference frozen: {len(list(meshes.glob('*.glb')))} meshes in {meshes}")
+        return 0
+    trellis = args.trellis or dataset / "pairs" / REFERENCE_DIR / "meshes"
+    if not trellis.is_dir():
+        raise SystemExit(f"no reference meshes in {trellis} (freeze them with --freeze-reference)")
+    res = compare(dataset, trellis.resolve(), args.sizes, args.refresh, args.label,
                   args.workers, before=args.before)
     path = args.dataset / "pairs" / "calibration.json"
     hist = json.loads(path.read_text(encoding="utf-8")).get("history", []) if path.is_file() else []

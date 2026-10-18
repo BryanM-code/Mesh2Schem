@@ -61,6 +61,18 @@ class DegradeParams:
     seed: int = 0
     min_blur_units: float = 0.0      # blur sigma floor in scene units (0 = off; not sampled)
     chroma_gamma: float = 1.0        # < 1 mutes strong colours more than weak ones (1 = off)
+    # Optional (0 = off; not sampled here): TRELLIS texture artefacts, in scene units.
+    blotch: float = 0.0              # lightness blotches: sd of a multiplicative factor
+    blotch_units: float = 2.0        # ... their size
+    warp_units: float = 0.0          # colours sampled this far off (wavy streaks, smears)
+    warp_wavelength_units: float = 8.0
+    cast_a: float = 0.0              # a white-balance cast, CIELAB a* / b* added
+    cast_b: float = 0.0
+    tint_ab: float = 0.0             # regional hue drift: sd of a slowly varying a* / b* shift
+    tint_units: float = 12.0         # ... its size
+    roof_darken: float = 0.0         # up-facing surfaces darker by up to this share (roofs)
+    target_lum: float = 0.0          # > 0: scale L* so its mean is this, chroma kept (TRELLIS sets
+                                     # its own exposure; the build's brightness does not)
 
 
 def sample_params(rng: np.random.Generator, ranges: dict | None = None) -> DegradeParams:
@@ -145,7 +157,16 @@ def degrade(scene: SceneMesh, p: DegradeParams):
         src = tuple(idx[a][c[:, 0], c[:, 1], c[:, 2]] for a in range(3))
         return vm.rgb[src].astype(np.float64)
 
-    rgb = color_at(v)
+    # TRELLIS texture artefacts draw from their own stream, so the draws below (and the
+    # geometry) are the same with or without them.
+    art = np.random.default_rng([int(p.seed), 0x7E])
+    if p.warp_units > 0:
+        # Colours read from a slowly wandering offset: fine stripes turn into wavy streaks
+        # and edges smear, as TRELLIS's baked textures do on busy facades.
+        warp = _value_noise(v, p.warp_wavelength_units * s, art, 3) * (p.warp_units * s)
+        rgb = color_at(v + warp)
+    else:
+        rgb = color_at(v)
 
     # Unseen side: mirrored visible side, darker, sometimes tinted.
     az = rng.uniform(0, 2 * np.pi)
@@ -165,8 +186,28 @@ def degrade(scene: SceneMesh, p: DegradeParams):
     sun = np.array([rng.normal(), rng.uniform(0.5, 1.5), rng.normal()])
     sun /= np.linalg.norm(sun)
     shade = p.ambient + (1 - p.ambient) * np.clip(normals @ sun, 0, None)
+    if p.roof_darken > 0:
+        # TRELLIS on real photos bakes roofs dark (seen at a grazing angle, or not at all).
+        shade = shade * (1.0 - p.roof_darken * np.clip(normals[:, 1], 0, 1))
     rgb = rgb * shade[:, None] * p.tone_gain
-    rgb = _hue_rotate(rgb, p.hue_deg, p.chroma, p.chroma_gamma)
+    rgb = _hue_rotate(rgb, p.hue_deg, p.chroma, p.chroma_gamma, p.cast_a, p.cast_b)
+    if p.tint_ab > 0:
+        # Whole regions drift in hue (a blue-grey roof over brown walls, a purple roof): a
+        # slowly varying a* / b* shift.
+        lab = srgb_to_lab(np.clip(rgb, 0, 255))
+        lab[:, 1:] += p.tint_ab * _value_noise(v, p.tint_units * s, art, 2)
+        rgb = lab_to_srgb(lab)
+    if p.blotch > 0:
+        # Lighter and darker patches about a block or two across: TRELLIS textures vary from
+        # block to block far more than per-vertex noise, which averages out, makes them.
+        rgb = rgb * np.clip(1.0 + p.blotch * _value_noise(v, p.blotch_units * s, art, 1), 0.2, 2.0)
+    if p.target_lum > 0:
+        # Exposure set by the output, not the build: L* scaled to the target mean. Chroma is
+        # left alone, as in TRELLIS's output, where colourfulness does not follow lightness (an
+        # sRGB gain would make the brightest inputs the most colourful).
+        lab = srgb_to_lab(np.clip(rgb, 0, 255))
+        lab[:, 0] = np.clip(lab[:, 0] * (p.target_lum / max(float(lab[:, 0].mean()), 1e-3)), 0.0, 100.0)
+        rgb = lab_to_srgb(lab)
     rgb = rgb + rng.normal(0, p.color_noise, size=rgb.shape)
     if p.color_smooth:
         adj = mesh.vertex_adjacency_graph
@@ -213,9 +254,10 @@ def mesh_stats(verts, faces):
 CHROMA_REF = 8.0                     # C* left unchanged by `chroma_gamma`
 
 
-def _hue_rotate(rgb, deg, chroma, gamma=1.0):
+def _hue_rotate(rgb, deg, chroma, gamma=1.0, cast_a=0.0, cast_b=0.0):
     """Rotate hue by `deg` and scale chroma by `chroma`; `gamma` < 1 also compresses it
-    towards CHROMA_REF (C' = chroma * REF * (C / REF) ** gamma)."""
+    towards CHROMA_REF (C' = chroma * REF * (C / REF) ** gamma); then add a white-balance
+    cast (`cast_a`, `cast_b` to a*, b*)."""
     lab = srgb_to_lab(np.clip(rgb, 0, 255))
     t = np.radians(deg)
     a, b = lab[..., 1], lab[..., 2]
@@ -223,9 +265,23 @@ def _hue_rotate(rgb, deg, chroma, gamma=1.0):
     if gamma != 1.0:
         c = np.hypot(a, b)
         scale = scale * np.where(c > 1e-6, (np.maximum(c, 1e-6) / CHROMA_REF) ** (gamma - 1.0), 1.0)
-    lab[..., 1] = (a * np.cos(t) - b * np.sin(t)) * scale
-    lab[..., 2] = (a * np.sin(t) + b * np.cos(t)) * scale
+    lab[..., 1] = (a * np.cos(t) - b * np.sin(t)) * scale + cast_a
+    lab[..., 2] = (a * np.sin(t) + b * np.cos(t)) * scale + cast_b
     return lab_to_srgb(lab)
+
+
+def _value_noise(points, wavelength, rng, channels=1):
+    """A smooth random field at `points` (N, 3): a normal random lattice of spacing
+    `wavelength` (the points' units) interpolated with cubic splines, then each channel set
+    to zero mean and unit spread over the points. (N, channels)."""
+    from scipy.ndimage import map_coordinates
+    q = (points - points.min(axis=0)) / max(float(wavelength), 1e-6) + 1.0
+    shape = tuple(int(n) for n in np.ceil(q.max(axis=0)) + 3)
+    out = np.empty((len(points), channels))
+    for k in range(channels):
+        val = map_coordinates(rng.normal(size=shape), q.T, order=3, mode="nearest")
+        out[:, k] = (val - val.mean()) / (val.std() + 1e-9)
+    return out
 
 
 def _punch_holes(faces, mesh, p, rng):

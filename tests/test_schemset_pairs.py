@@ -300,7 +300,8 @@ class PairValidation(unittest.TestCase):
         cls.h = house()
         mesh, _ = meshify(cls.h["blocks"], cls.h["palette"], cls.h["exterior"], cls.h["ground_height"])
         var = sample_variant(1234)
-        vm, deg, info, cls.reference = make_input(mesh, cls.h["blocks"].shape, var)
+        vm, deg, info, ref = make_input(mesh, cls.h["blocks"].shape, var)
+        cls.reference = ref.solid
         cls.pair = {"input_occ": vm.solid.astype(np.uint8), "input_surface": vm.surface.astype(np.uint8),
                     "input_rgb": vm.rgb.astype(np.uint8), "target_shape": cls.h["target_shape"],
                     "target_material": cls.h["target_material"],
@@ -396,7 +397,9 @@ class ColourModel(unittest.TestCase):
             st = input_stats(vm)
             lum.append(st["lum"])
             chroma.append(st["chroma"])
-        lo, hi = COLOUR_TARGET["lum_p10"][0], COLOUR_TARGET["lum_p90"][1]
+        # The band holds the dataset's p10 and p90 (`pairs_calibrate` checks those); a single
+        # sample may sit a little beyond its edges, never far (pairs-1 put inputs at L* 46-63).
+        lo, hi = COLOUR_TARGET["lum_p10"][0] - 5, COLOUR_TARGET["lum_p90"][1] + 5
         self.assertTrue(all(lo <= x <= hi for x in lum), lum)
         self.assertLessEqual(float(np.mean(chroma)), COLOUR_TARGET["chroma_p90_max"])
         self.assertGreater(max(lum) / min(lum), 1.5, lum)    # exposure varies per sample
@@ -460,6 +463,248 @@ class EvalAlignment(unittest.TestCase):
         self.assertGreater(m["iou"], 0.7)
         off = ((info["yaw_deg"] % 90) + 45) % 90 - 45                   # the turn is undone,
         self.assertLessEqual(abs(off), 8)                              # within the 1x yaw noise
+
+    def test_scale_search_recovers_a_widened_mesh(self):
+        """Real photos: a mesh 25% wider than the build (its builder's proportions) is placed
+        at the right horizontal scale; the height fit alone leaves it too wide. One step of
+        slack: this house is small and block-aligned, and the voxeliser puts a face that lies
+        on a cell boundary in the cell beyond it, so its fit leans one step small."""
+        from schemset.meshify import meshify
+        from schemset.pairs import target_volume
+        from schemset.real_trellis import align
+        h = house()
+        mesh, _ = meshify(h["blocks"], h["palette"], h["exterior"], h["ground_height"])
+        wide = mesh.transformed(np.diag([1.25, 1.0, 1.25]), (0.0, 0.0, 0.0))
+        vol = target_volume(h["target_shape"], h["exterior"], h["ground_height"])
+        _, plain = align(wide, vol)
+        vm, info = align(wide, vol, scales=(0.9, 1.0, 1.1), aspects=(0.6, 0.7, 0.8, 0.9, 1.0))
+        self.assertEqual(info["scale_mult"], 1.0)
+        self.assertIn(info["aspect"], (0.7, 0.8))                      # 1 / 1.25 = 0.8
+        self.assertGreater(info["iou_2x_shifted"], plain["iou_2x_shifted"] + 0.03)
+        self.assertIn("iou_2x_refined", info["scale_search"])
+
+
+@unittest.skipUnless(HAVE_MCVOXEL, SKIP)
+class DetailMetric(unittest.TestCase):
+    """schemset.detail: small features of the reference that survive in an input."""
+
+    @classmethod
+    def setUpClass(cls):
+        from schemset.detail import reference_model
+        from schemset.meshify import meshify
+        cls.h = house()
+        cls.mesh, _ = meshify(cls.h["blocks"], cls.h["palette"], cls.h["exterior"], cls.h["ground_height"])
+        cls.ref = reference_model(cls.mesh, cls.h["target_shape"].shape)
+
+    def blurred(self, sigma_blocks):
+        from schemset.pairs import REFERENCE_GLASS, glass_look, voxelize_input
+        from synth.degrade import DegradeParams, degrade
+        p = DegradeParams(bottleneck=64, blur_sigma=0.5, surface_noise=0.0, noise_wavelength=8.0,
+                          hole_fraction=0.0, hole_patch=1, floaters=0, tone_gain=1.0, ambient=1.0, hue_deg=0.0,
+                          chroma=1.0, color_noise=0.0, back_blend=0.0, back_darken=1.0, back_tint_deg=0.0,
+                          color_smooth=0, seed=0, min_blur_units=sigma_blocks)
+        out, _ = degrade(glass_look(self.mesh, REFERENCE_GLASS), p)
+        return voxelize_input(out, self.h["target_shape"].shape)
+
+    def test_the_reference_keeps_all_its_detail(self):
+        from schemset.detail import detail_of
+        d = detail_of(self.ref, self.ref)
+        self.assertGreater(d["detail_features"], 50)
+        self.assertEqual(d["detail_geo"], 1.0)
+        self.assertEqual(d["detail_spurious"], 0.0)
+        self.assertAlmostEqual(d["detail_colour"], 1.0, places=3)
+
+    def test_more_blur_keeps_less_detail(self):
+        from schemset.detail import detail_of
+        light, heavy = detail_of(self.blurred(0.3), self.ref), detail_of(self.blurred(1.2), self.ref)
+        self.assertLess(light["detail_geo"], 1.0)
+        self.assertLess(heavy["detail_geo"], light["detail_geo"])
+        self.assertLess(heavy["detail_colour"], light["detail_colour"])
+
+    def test_a_one_cell_shift_is_not_lost_detail(self):
+        from types import SimpleNamespace
+
+        from schemset.detail import detail_of
+        r = self.ref
+        moved = SimpleNamespace(solid=np.roll(r.solid, 1, axis=0), surface=np.roll(r.surface, 1, axis=0),
+                                rgb=np.roll(r.rgb, 1, axis=0))
+        d = detail_of(moved, r)
+        self.assertEqual(d["detail_geo"], 1.0)
+        self.assertEqual(d["detail_shift_cells"], [-1, 0, 0])
+
+    def test_exposure_does_not_change_colour_detail(self):
+        from types import SimpleNamespace
+
+        from schemset.detail import colour_cast, detail_of
+        r = self.ref
+        dark = SimpleNamespace(solid=r.solid, surface=r.surface, rgb=(r.rgb * 0.5).astype(np.uint8))
+        self.assertGreater(detail_of(dark, r)["detail_colour"], 0.97)
+        self.assertLess(colour_cast(dark, r)["cast_dL"], -10)
+
+    def test_tiles_give_the_same_answer(self):
+        import schemset.detail as D
+        whole = D.detail_of(self.blurred(0.5), self.ref)
+        old = D.TILE
+        try:
+            D.TILE = 8
+            tiled = D.detail_of(self.blurred(0.5), self.ref)
+        finally:
+            D.TILE = old
+        self.assertEqual(whole["detail_geo"], tiled["detail_geo"])
+        self.assertEqual(whole["detail_spurious"], tiled["detail_spurious"])
+        self.assertAlmostEqual(whole["detail_colour"], tiled["detail_colour"], places=3)
+
+
+@unittest.skipUnless(HAVE_MCVOXEL, SKIP)
+class TextureArtefacts(unittest.TestCase):
+    """pairs-3 colour model: the TRELLIS texture artefacts never move geometry."""
+
+    @classmethod
+    def setUpClass(cls):
+        from schemset.meshify import meshify
+        h = house()
+        cls.mesh, _ = meshify(h["blocks"], h["palette"], h["exterior"], h["ground_height"])
+
+    def degraded(self, **kw):
+        from dataclasses import replace
+
+        from synth.degrade import DegradeParams, degrade
+        base = DegradeParams(bottleneck=64, blur_sigma=0.6, surface_noise=0.1, noise_wavelength=8.0,
+                             hole_fraction=0.005, hole_patch=8, floaters=2, tone_gain=0.9, ambient=0.6,
+                             hue_deg=2.0, chroma=1.0, color_noise=3.0, back_blend=0.3, back_darken=0.5,
+                             back_tint_deg=0.0, color_smooth=1, seed=7)
+        out, _ = degrade(self.mesh, replace(base, **kw))
+        return out
+
+    def test_artefacts_change_colour_not_geometry(self):
+        plain = self.degraded()
+        art = self.degraded(blotch=0.3, blotch_units=1.5, warp_units=1.0, warp_wavelength_units=6.0,
+                            tint_ab=6.0, tint_units=8.0, roof_darken=0.4, cast_a=2.0, cast_b=-3.0)
+        self.assertTrue(np.array_equal(plain.verts, art.verts))
+        self.assertTrue(np.array_equal(plain.faces, art.faces))
+        self.assertGreater(np.abs(plain.vcolor - art.vcolor).mean(), 2.0)
+
+    def test_roof_darken_darkens_only_what_faces_up(self):
+        plain, dark = self.degraded(), self.degraded(roof_darken=0.5)
+        tri = plain.verts[plain.faces]
+        n = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+        n /= np.linalg.norm(n, axis=1, keepdims=True) + 1e-12
+        up = plain.faces[np.abs(n[:, 1]) > 0.9].ravel()
+        side = plain.faces[np.abs(n[:, 1]) < 0.1].ravel()
+        side = np.setdiff1d(side, up)
+        self.assertLess(dark.vcolor[up].mean(), 0.9 * plain.vcolor[up].mean())
+        self.assertAlmostEqual(dark.vcolor[side].mean(), plain.vcolor[side].mean(), delta=2.0)
+
+    def test_target_lum_sets_the_mean_lightness_whatever_the_exposure(self):
+        from mcvoxel.block_palette import srgb_to_lab
+        for target in (12.0, 22.0, 38.0):
+            for gain in (0.5, 1.5):
+                out = self.degraded(tone_gain=gain, target_lum=target)
+                lum = float(srgb_to_lab(out.vcolor)[..., 0].mean())
+                self.assertAlmostEqual(lum, target, delta=1.5, msg=(target, gain))
+
+    def test_target_lum_draws_follow_their_quantiles(self):
+        from schemset.pairs import ARTEFACTS, sample_variant
+        q, lum = zip(*ARTEFACTS["target_lum"])
+        t = np.array([sample_variant(s)["degrade"]["target_lum"] for s in range(500)])
+        self.assertTrue(((t >= lum[0]) & (t <= lum[-1])).all())
+        for qq, ll in zip(q[1:-1], lum[1:-1]):
+            self.assertAlmostEqual(float(np.quantile(t, qq)), ll, delta=1.5, msg=qq)
+
+    def test_variant_geometry_does_not_depend_on_artefacts(self):
+        from schemset.pairs import sample_variant
+        art = {"blotch": [0.1, 0.3], "blotch_units": [1.0, 2.0], "warp_units": [0.5, 2.0], "warp_prob": 0.5,
+               "warp_wavelength_units": [6.0, 16.0], "cast_sd": 2.0, "tint_ab": [0.0, 6.0],
+               "tint_units": [8.0, 20.0], "roof_darken": [0.2, 0.5]}
+        a, b = sample_variant(99, artefacts={}), sample_variant(99, artefacts=art)
+        self.assertEqual((a["yaw_deg"], a["offset_blocks"]), (b["yaw_deg"], b["offset_blocks"]))
+        for k in ("bottleneck", "blur_sigma", "surface_noise", "noise_wavelength", "hole_fraction",
+                  "hole_patch", "floaters", "seed", "min_blur_units", "tone_gain", "back_darken"):
+            self.assertEqual(a["degrade"][k], b["degrade"][k], k)
+        self.assertEqual(a["glass"], b["glass"])
+        self.assertGreater(b["degrade"]["blotch"], 0.0)
+
+
+@unittest.skipUnless(HAVE_MCVOXEL, SKIP)
+class GalleryRawTile(unittest.TestCase):
+    def test_raw_mesh_is_drawn_in_the_voxel_tiles_frame(self):
+        """pairs_gallery: a mesh drawn with `_points_image` in `_voxel_frame` lands where its
+        own voxelisation is drawn, so a raw TRELLIS tile and its voxelised tile overlay."""
+        from mcvoxel.scene import scene_color_fns
+        from schemset.meshify import meshify
+        from schemset.pairs import voxelize_input
+        from schemset.pairs_gallery import _input_image, _points_image, _voxel_frame
+        from synth.preview import sample_surface
+        h = house()
+        mesh, _ = meshify(h["blocks"], h["palette"], h["exterior"], h["ground_height"])
+        vm = voxelize_input(mesh, h["target_shape"].shape)
+        _, pc = scene_color_fns(mesh)
+        pts, cols, normals = sample_surface(mesh.verts * 2.0, mesh.faces, pc, 300_000, seed=0)
+        raw = np.asarray(_points_image(pts, cols, normals, _voxel_frame(vm.solid)))[:, :, 3] > 0
+        vox = np.asarray(_input_image(vm.solid, vm.rgb))[:, :, 3] > 0
+        self.assertGreater((raw & vox).sum() / (raw | vox).sum(), 0.85)
+
+
+class RealPhotoInput(unittest.TestCase):
+    def test_the_cutout_goes_to_trellis_and_the_photo_when_it_was_rejected(self):
+        from schemset.real_photo import PHOTOS, build_dir, photo_path, trellis_image
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            p = next(x for x in PHOTOS if "commons" in x)
+            d = build_dir(tmp, p)
+            d.mkdir(parents=True)
+            (d / "photo.jpg").write_bytes(b"jpg")
+            self.assertEqual(photo_path(tmp, p), d / "photo.jpg")
+            self.assertEqual(trellis_image(tmp, p), d / "photo.jpg")        # cutout rejected
+            (d / "cutout.png").write_bytes(b"png")
+            self.assertEqual(trellis_image(tmp, p), d / "cutout.png")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class CalibrationReference(unittest.TestCase):
+    """pairs_calibrate: the TRELLIS reference is frozen with checksums and checked."""
+
+    def test_any_change_to_the_reference_stops_the_calibration(self):
+        from schemset.pairs_calibrate import check_reference, freeze_reference
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            src = tmp / "src"
+            src.mkdir()
+            for name in ("House_a.glb", "Tower_b.glb", "Car_c.glb"):
+                (src / name).write_bytes(name.encode() * 100)
+            meshes = freeze_reference(src, tmp / "ds")
+            self.assertTrue(check_reference(meshes))
+            manifest = json.loads((meshes.parent / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual([f["building"] for f in manifest["files"]], [False, True, True])
+            (meshes / "House_a.glb").write_bytes(b"changed")
+            with self.assertRaises(SystemExit):
+                check_reference(meshes)
+            (meshes / "House_a.glb").write_bytes(b"House_a.glb" * 100)
+            (meshes / "New_d.glb").write_bytes(b"new")
+            with self.assertRaises(SystemExit):
+                check_reference(meshes)
+            (meshes / "New_d.glb").unlink()
+            (meshes / "Tower_b.glb").unlink()
+            with self.assertRaises(SystemExit):
+                check_reference(meshes)
+            self.assertIsNone(check_reference(src))                 # no manifest: unfrozen
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class MetricSubsets(unittest.TestCase):
+    def test_low_iou_pairs_are_reported_both_ways(self):
+        from schemset.pairs import metric_subsets
+        pairs = [{"id": "a", "split": "train", "variant": 0, "status": "ok", "validation": {"flags": []}},
+                 {"id": "a", "split": "train", "variant": 1, "status": "ok", "validation": {"flags": ["low_iou"]}},
+                 {"id": "b", "split": "test", "variant": 0, "status": "ok", "validation": {"flags": []}},
+                 {"id": "b", "split": "test", "variant": 1, "status": "rejected", "validation": {}}]
+        s = metric_subsets(pairs)
+        self.assertEqual(s["train"]["all"], ["a/v0", "a/v1"])
+        self.assertEqual(s["train"]["without_low_iou"], ["a/v0"])
+        self.assertEqual(s["train"]["low_iou"], ["a/v1"])
+        self.assertEqual(s["test"]["counts"], {"all": 1, "without_low_iou": 1, "low_iou": 0})
 
 
 @unittest.skipUnless(HAVE_MCVOXEL, SKIP)

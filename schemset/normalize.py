@@ -56,7 +56,9 @@ from pathlib import Path
 
 import numpy as np
 
-VERSION = "normalize-4"             # 4: D22 amended -- covered exterior air capped at
+VERSION = "normalize-5"             # 5: depth under cover measured from open air, so
+                                    #    facades under deep, tall eaves are shell again
+                                    # 4: D22 amended -- covered exterior air capped at
                                     #    COVER_DEPTH (3: Phase 3 fixes, D22 / D23)
 
 
