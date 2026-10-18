@@ -625,6 +625,20 @@ class TextureArtefacts(unittest.TestCase):
         self.assertGreater(b["degrade"]["blotch"], 0.0)
 
 
+class GalleryCache(unittest.TestCase):
+    def test_cards_of_removed_builds_are_dropped_with_their_own_images(self):
+        from schemset.pairs_gallery import drop_stale
+        with tempfile.TemporaryDirectory() as tmp:
+            img = Path(tmp)
+            for f in ("gone__target.png", "gone__v0.png", "kept__target.png", "shared.png"):
+                (img / f).write_bytes(b"x")
+            images = {"gone": {"target": "gone__target.png", "v0": "gone__v0.png", "other": "shared.png"},
+                      "kept": {"target": "kept__target.png"}, "real:kept": {"realphoto": "shared.png"}}
+            self.assertEqual(drop_stale(images, {"kept", "real:kept"}, img), ["gone"])
+            self.assertEqual(sorted(images), ["kept", "real:kept"])
+            self.assertEqual(sorted(f.name for f in img.iterdir()), ["kept__target.png", "shared.png"])
+
+
 @unittest.skipUnless(HAVE_MCVOXEL, SKIP)
 class GalleryRawTile(unittest.TestCase):
     def test_raw_mesh_is_drawn_in_the_voxel_tiles_frame(self):
@@ -705,6 +719,24 @@ class MetricSubsets(unittest.TestCase):
         self.assertEqual(s["train"]["without_low_iou"], ["a/v0"])
         self.assertEqual(s["train"]["low_iou"], ["a/v1"])
         self.assertEqual(s["test"]["counts"], {"all": 1, "without_low_iou": 1, "low_iou": 0})
+
+
+class PruneExcluded(unittest.TestCase):
+    def test_an_excluded_builds_pair_outputs_go_and_nothing_else(self):
+        from schemset.pairs import prune_excluded
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            for bid in ("gone", "kept"):
+                (out / "synthetic" / bid).mkdir(parents=True)
+                (out / "synthetic" / bid / "v0.npz").write_bytes(b"x")
+                (out / "records").mkdir(exist_ok=True)
+                (out / "records" / f"{bid}.json").write_text("{}")
+            rows = {"gone": {"split": "excluded"}, "kept": {"split": "train"}, "../x": {"split": "excluded"}}
+            self.assertEqual(prune_excluded(out, rows), ["records/gone.json", "synthetic/gone/"])
+            self.assertFalse((out / "synthetic" / "gone").exists())
+            self.assertTrue((out / "synthetic" / "kept" / "v0.npz").is_file())
+            self.assertTrue((out / "records" / "kept.json").is_file())
+            self.assertEqual(prune_excluded(out, rows), [])
 
 
 @unittest.skipUnless(HAVE_MCVOXEL, SKIP)

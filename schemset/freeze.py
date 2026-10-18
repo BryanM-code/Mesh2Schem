@@ -17,8 +17,8 @@ Phase 2 of docs/mesh-to-schem-plan.md (version 4). Writes, under --out:
 
 Two decisions are applied on top of the seeded split, so no other build moves:
 
-*   D24: builds set aside by decision (`SET_ASIDE`) get split "excluded" and their reason as a
-    flag.
+*   D24, D25: builds set aside by decision (`SET_ASIDE`) get split "excluded" and their reason
+    as a flag.
 *   Geometric duplicates (`schemset.dedupe` -> `geometric_duplicates.json`, read here when
     present): a duplicate pair in two different splits is put into one by moving the smaller
     creator group, whole, into the other's split. Both builds get `geometric_duplicate`.
@@ -74,13 +74,18 @@ PASS_THROUGH = (
     "listing_completion_percent", "source_url", "build_name",
 )
 FLAGS = ("tier_x", "incomplete_listing", "oversized_capture", "legacy_format",
-         "near_dup_candidate", "excluded_landscape_diorama", "geometric_duplicate")
+         "near_dup_candidate", "excluded_landscape_diorama", "excluded_target_lost_terrain",
+         "geometric_duplicate")
 
 # D24 (2026-10-12): landscape dioramas set aside -- the building is a small part of a
 # modelled landscape, so the crop cannot make a clean training target of it.
+# D25 (2026-10-17): a cliff house whose rooms were dug into rock. The crop finds no natural
+# terrain (`ground_fallback`) and removes the rock that formed the rooms' back walls, so the
+# target opens them up: a wrong target (it was in test).
 SET_ASIDE = {
     "pmc-traditional-house-cottage-style": "excluded_landscape_diorama",   # forest + road
     "pmc-the-lighthouse-5778696": "excluded_landscape_diorama",            # rock island
+    "pmc-richelieu-contemporary": "excluded_target_lost_terrain",          # D25: cliff house
 }
 GEOMETRIC_DUPLICATES = "geometric_duplicates.json"
 OVERSIZED_XZ = 200            # X or Z above this: a capture to crop in Phase 3

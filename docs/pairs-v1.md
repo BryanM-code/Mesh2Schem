@@ -475,20 +475,20 @@ is an independent check on it: its 10 photos give TRELLIS L\* 17 (the reference 
 
 pairs-3 (`pairs/calibration.json`), p10 / p50 / p90:
 
-| statistic | TRELLIS on real photos (150) | synthetic pairs-3, all (1,268) | synthetic pairs-3, size-matched (940) | synthetic pairs-2, all |
+| statistic | TRELLIS on real photos (150) | synthetic pairs-3, all (1,264) | synthetic pairs-3, size-matched (936) | synthetic pairs-2, all |
 | --- | --- | --- | --- | --- |
 | stair45 | 0.02 / 0.25 / 0.70 | 0.04 / 0.20 / 0.49 | 0.04 / 0.21 / 0.50 | 0.04 / 0.20 / 0.49 |
 | normal roughness | 4.2 / 8.1 / 13.6° | 4.0 / 7.5 / 10.4° | 5.3 / 7.8 / 10.5° | 4.0 / 7.5 / 10.3° |
-| fill_gain | 2.69 / 5.45 / 10.92 | 3.06 / 5.14 / 9.83 | 3.17 / 5.09 / 8.41 | 3.10 / 5.17 / 10.09 |
-| rough3 (blobby shell) | 0.018 / 0.029 / 0.074 | 0.026 / 0.053 / 0.100 | 0.026 / 0.055 / 0.097 | 0.026 / 0.053 / 0.100 |
-| L\* | 11.0 / 21.9 / 33.7 | **11.7 / 21.6 / 37.4** | 11.5 / 21.6 / 37.4 | 12.4 / 22.0 / 36.5 |
-| C\* | 2.8 / 6.7 / 11.6 | **3.5 / 7.1 / 12.0** | 3.4 / 7.0 / 12.0 | 2.6 / 6.0 / 11.5 |
-| nbr_de | 1.53 / 2.48 / 4.99 | **1.49 / 2.97 / 5.17** | 1.89 / 3.11 / 5.07 | 1.19 / 2.24 / 3.53 |
+| fill_gain | 2.69 / 5.45 / 10.92 | 3.06 / 5.15 / 9.83 | 3.17 / 5.12 / 8.41 | 3.10 / 5.17 / 10.09 |
+| rough3 (blobby shell) | 0.018 / 0.029 / 0.074 | 0.026 / 0.053 / 0.100 | 0.026 / 0.054 / 0.097 | 0.026 / 0.053 / 0.100 |
+| L\* | 11.0 / 21.9 / 33.7 | **11.6 / 21.6 / 37.3** | 11.4 / 21.6 / 37.2 | 12.4 / 22.0 / 36.5 |
+| C\* | 2.8 / 6.7 / 11.6 | **3.5 / 7.1 / 12.0** | 3.4 / 7.0 / 11.9 | 2.6 / 6.0 / 11.5 |
+| nbr_de | 1.53 / 2.48 / 4.99 | **1.49 / 2.97 / 5.17** | 1.88 / 3.10 / 5.06 | 1.19 / 2.24 / 3.53 |
 | axis_area | 0.13 / 0.46 / 0.56 | 0.10 / 0.25 / 0.48 | 0.11 / 0.25 / 0.47 | 0.10 / 0.26 / 0.48 |
 
 Colour acceptance (`colour_acceptance`): **accepted**. L\* median inside the reference's
 p10–p90, 73.5% of inputs inside it (≥ 70%); C\* median inside, 82.8% inside; nbr ΔE median
-inside; `COLOUR_TARGET` met (L\* p10 11.7 in 10–14, p50 21.6 in 20–26, p90 37.4 in 36–45; C\*
+inside; `COLOUR_TARGET` met (L\* p10 11.6 in 10–14, p50 21.6 in 20–26, p90 37.3 in 36–45; C\*
 p50 7.1 in 6–8, p90 12.0 ≤ 14).
 
 How to read it:
@@ -679,13 +679,13 @@ What the side-by-side showed:
 
 ### TRELLIS statistics per set (p10 / p50 / p90)
 
-| statistic | TRELLIS on real photos (reference, 150) | TRELLIS on the 10 real photos of builds | TRELLIS on smooth photos (25) | TRELLIS on blocky photos (25) | synthetic pairs-3 (1,268) |
+| statistic | TRELLIS on real photos (reference, 150) | TRELLIS on the 10 real photos of builds | TRELLIS on smooth photos (25) | TRELLIS on blocky photos (25) | synthetic pairs-3 (1,264) |
 | --- | --- | --- | --- | --- | --- |
 | stair45 | 0.02 / 0.25 / 0.70 | 0.17 / 0.42 / 0.62 | 0.05 / **0.16** / 0.49 | 0.35 / **0.87** / 0.96 | 0.04 / 0.20 / 0.49 |
 | normal roughness | 4.2 / 8.1 / 13.6° | 0.8 / 6.6 / 19.7° | 2.6 / **7.2** / 12.3° | 4.3 / **18.4** / 26.5° | 4.0 / 7.5 / 10.4° |
-| fill_gain | 2.69 / 5.45 / 10.92 | – | 2.68 / 4.65 / 11.42 | 1.85 / 4.10 / 10.86 | 3.06 / 5.14 / 9.83 |
+| fill_gain | 2.69 / 5.45 / 10.92 | – | 2.68 / 4.65 / 11.42 | 1.85 / 4.10 / 10.86 | 3.06 / 5.15 / 9.83 |
 | rough3 | 0.018 / 0.029 / 0.074 | – | 0.019 / 0.060 / 0.145 | 0.015 / 0.034 / 0.088 | 0.026 / 0.053 / 0.100 |
-| L\* | 11.0 / 21.9 / 33.7 | 7.3 / 17.4 / 32.2 | 7.4 / **23.7** / 33.2 | 26.1 / 39.3 / 51.2 | 11.7 / 21.6 / 37.4 |
+| L\* | 11.0 / 21.9 / 33.7 | 7.3 / 17.4 / 32.2 | 7.4 / **23.7** / 33.2 | 26.1 / 39.3 / 51.2 | 11.6 / 21.6 / 37.3 |
 | C\* | 2.8 / 6.7 / 11.6 | 2.4 / 3.2 / 5.9 | 1.6 / 6.0 / 12.6 | 2.4 / 13.9 / 27.5 | 3.5 / 7.1 / 12.0 |
 | nbr_de | 1.53 / 2.48 / 4.99 | 0.92 / 2.49 / 4.24 | 1.13 / 2.20 / 3.45 | 1.76 / 3.20 / 5.80 | 1.49 / 2.97 / 5.17 |
 | feature recall (`detail_geo`) | – | 0.18 / 0.33 / 0.39 | 0.23 / 0.39 / 0.60 | 0.22 / 0.37 / 0.57 | 0.33 / 0.57 / 0.83 |
@@ -833,21 +833,23 @@ new downloads, which wait for approval.
 first on 3 workers), settings `pairs-3` (`d11b2e631b41`) / `meshify-3`, σ floor 0.42 block, on
 the normalize-5 targets:
 
-- **Volume:** 317 builds, **1,268 pairs generated, 0 rejected, 0 builds failed**. Train
-  1,012, val 128, test 128.
+- **Volume:** 316 builds, **1,264 pairs generated, 0 rejected, 0 builds failed**. Train
+  1,012, val 128, test 124. (1,268 in 317 builds until 2026-10-17, when D25 set the Richelieu
+  cliff house aside and its pairs were removed; the vocabulary append re-encoded the targets
+  of 20 builds, and their inputs are unchanged, byte for byte in every statistic.)
 - **Geometry** is pairs-2's wherever normalize-5 left a build's masks alone (same seeds; the
   colour model draws from its own stream). The 153 builds whose masks changed in normalize-5
   have a different outside, so different inputs.
 - **Colour model accepted** (`pairs/calibration.json`): every check passes, the narrowest
   being 73.5% of inputs inside the reference's L\* band (70% required).
 
-All 1,268 pairs, p10 / p50 / p90, before and after:
+All 1,264 pairs, p10 / p50 / p90, before and after:
 
 | statistic | pairs-2 | pairs-3 | TRELLIS on real photos (reference, 150) |
 | --- | --- | --- | --- |
-| L\* | 12.4 / 22.0 / 36.5 | **11.7 / 21.6 / 37.4** | 11.0 / 21.9 / 33.7 |
+| L\* | 12.4 / 22.0 / 36.5 | **11.6 / 21.6 / 37.3** | 11.0 / 21.9 / 33.7 |
 | share of L\* in the reference's p10–p90 | 0.784 | **0.735** | |
-| C\* | 2.65 / 6.04 / 11.51 | **3.45 / 7.09 / 12.04** | 2.79 / 6.69 / 11.60 |
+| C\* | 2.65 / 6.04 / 11.51 | **3.45 / 7.08 / 12.03** | 2.79 / 6.69 / 11.60 |
 | share of C\* in the reference's p10–p90 | 0.790 | **0.828** | |
 | correlation of L\* and C\* across inputs | 0.19 | **0.02** | 0.14 |
 | nbr ΔE | 1.19 / 2.24 / 3.53 | **1.49 / 2.97 / 5.17** | 1.53 / 2.48 / 4.99 |
@@ -855,12 +857,12 @@ All 1,268 pairs, p10 / p50 / p90, before and after:
 | feature recall (`detail_geo`) | the same geometry | 0.33 / 0.57 / 0.83 | 0.23 / 0.39 / 0.60 (smooth photos) |
 | spurious (`detail_spurious`) | the same geometry | 0.08 / 0.13 / 0.25 | 0.26 / 0.34 / 0.40 (smooth photos) |
 | stair45 | 0.04 / 0.20 / 0.48 | 0.04 / 0.20 / 0.49 | 0.02 / 0.25 / 0.70 |
-| normal roughness | 3.95 / 7.47 / 10.34° | 3.98 / 7.49 / 10.44° | 4.2 / 8.1 / 13.6° |
-| fill_gain | 3.10 / 5.17 / 10.09 | 3.06 / 5.14 / 9.83 | 2.69 / 5.45 / 10.92 |
+| normal roughness | 3.95 / 7.47 / 10.34° | 3.97 / 7.48 / 10.39° | 4.2 / 8.1 / 13.6° |
+| fill_gain | 3.10 / 5.17 / 10.09 | 3.06 / 5.15 / 9.83 | 2.69 / 5.45 / 10.92 |
 | rough3 | 0.026 / 0.053 / 0.100 | 0.026 / 0.053 / 0.100 | 0.018 / 0.029 / 0.074 |
 | block IoU with the target volume | 0.62 / 0.77 / 0.86 | 0.61 / 0.77 / 0.86 | |
 
-- **L\* and C\*** follow the reference; the top tail is brighter (p90 37.4 against 33.7), which
+- **L\* and C\*** follow the reference; the top tail is brighter (p90 37.3 against 33.7), which
   `COLOUR_TARGET` asks for (p90 36–45). Lightness no longer drives colourfulness.
 - **nbr ΔE**: the p90 gap is closed (5.17 against 4.99; pairs-2 3.53). The median is now above
   the reference's (2.97 against 2.48) while p10 matches: block-to-block variation is a little
@@ -901,20 +903,21 @@ Synthetic v1 against TRELLIS on the same 25 evaluation builds (p10 / p50 / p90):
   0.98; excess p10 / p50 / p90 0.13 / 0.22 / 0.38.
 - **Frame:** residual against the placed reference p50 0.0, p90 0.37, p99 0.84, max 2.08
   cells (ab-11663 v3, a normalize-5 build, against its tolerance of 2.25). Every pair is
-  within its tolerance. Per-build frame check: all 317 pass.
+  within its tolerance. Per-build frame check: all 316 pass.
 - **Meshify:** 192k stair corner shapes and 143k pane / fence / wall connections derived for
   legacy formats; 54k ground-layer blocks closed as slabs, in 163 builds; 39k voxels of
-  decor and decor-enclosed air opened to the outside, in 283 builds.
-- **Disk:** 298.9 MB of pair npz (1,268 files). All of `pairs/` is 1.20 GB: the eval sets with
+  decor and decor-enclosed air opened to the outside, in 282 builds.
+- **Disk:** 298.6 MB of pair npz (1,264 files). All of `pairs/` is 1.20 GB: the eval sets with
   their trials, the frozen TRELLIS reference (134 MB), `history/pairs-2/`, the real photos and
   the gallery.
 - **Time:** 35 min wall on 5 workers (the 3 largest builds first on 3 workers: 266 s). The
   eval sets took about 1 GPU-minute per TRELLIS mesh, and alignment 10 s–2 min per build.
-- **Tests:** `tests/test_schemset_pairs.py`, 46 tests (15 new this round): the detail metric,
-  the texture artefacts and the exposure (`target_lum`), the gallery's raw tile, the
-  real-photo input, the frozen reference, the metric subsets, the scale search; and
-  `tests/test_schemset_crop_rules.py`, 28 (2 new: the Hotel Piran regression and its
-  counterpart, a deep low canopy that stays capped). The BDC suite: 459 tests, all pass.
+- **Tests:** `tests/test_schemset_pairs.py`, 48 tests: the detail metric, the texture
+  artefacts and the exposure (`target_lum`), the gallery's raw tile and stale-card cleanup,
+  the real-photo input, the frozen reference, the metric subsets, the scale search, the
+  pruning of excluded builds' pairs; and `tests/test_schemset_crop_rules.py`, 29: the Hotel
+  Piran regression and its counterpart (a deep low canopy that stays capped), and D25's
+  set-aside. The BDC suite: 462 tests, all pass.
 
 ## Domain gaps and caveats
 

@@ -369,6 +369,19 @@ class SetAsideAndDuplicates(unittest.TestCase):
         self.assertEqual(len(out["set_aside_d24"]), 2)
         self.assertEqual(out["duplicate_moves"], [])
 
+    def test_d25_cliff_house_set_aside_and_nobody_else_moves(self):
+        F, rows, groups = self.rows()
+        rows.append({"id": "pmc-richelieu-contemporary", "split": "test", "flags": [],
+                     "creator_group": "e", "licence_tier": "B"})
+        groups.append({"key": "e", "split": "test", "ids": ["pmc-richelieu-contemporary"]})
+        with tempfile.TemporaryDirectory() as tmp:
+            out = F.apply_overrides(rows, groups, Path(tmp) / "none.json")
+        by_id = {r["id"]: r for r in rows}
+        self.assertEqual(by_id["pmc-richelieu-contemporary"]["split"], "excluded")
+        self.assertIn("excluded_target_lost_terrain", by_id["pmc-richelieu-contemporary"]["flags"])
+        self.assertEqual(len(out["set_aside_d24"]), 3)
+        self.assertEqual([by_id[b]["split"] for b in ("x1", "x2", "y1")], ["train", "train", "test"])
+
     def test_duplicate_pair_moves_the_smaller_group(self):
         F, rows, groups = self.rows()
         with tempfile.TemporaryDirectory() as tmp:

@@ -371,7 +371,9 @@ class CoverageTests(unittest.TestCase):
             "minecraft:piston_head[facing=up]": ("ignore", "decor:redstone_rails", "ignore"),
             "minecraft:wall_torch[facing=north]": ("ignore", "decor:lighting", "ignore"),
             "minecraft:snow[layers=1]": ("ignore", "decor:snow_layers", "ignore"),
-            "minecraft:bamboo_mosaic": ("ignore", "full", "ignore"),
+            "minecraft:gilded_blackstone": ("ignore", "full", "ignore"),
+            "minecraft:bamboo_mosaic": ("exact", "full", "ignore"),          # appended in 0.6.1
+            "minecraft:redstone_ore[lit=true]": ("lossy", "lit", "ignore"),  # appended in 0.6.1
             "legacy:unknown_700": ("ignore", None, "ignore"),
         }
         for state, (cls, detail, v2) in cases.items():

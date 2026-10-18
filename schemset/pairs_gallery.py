@@ -422,6 +422,8 @@ def build_gallery(dataset: Path, only=None, workers: int = 1, force: bool = Fals
         images[key] = res["images"]
         for e in res["errors"]:
             print(f"  {key}: {e}", flush=True)
+    for key in drop_stale(images, set(by_build) | {"real:" + p["id"] for p in PHOTOS}, out_dir / "img"):
+        print(f"  dropped the gallery images of {key}: no longer in the pairs", flush=True)
     cache_path.write_text(json.dumps(images, indent=1) + "\n", encoding="utf-8", newline="\n")
     cards = [card_data(bid, ps, rows.get(bid, {}), rts.get(bid, {}), images.get(bid, {}))
              for bid, ps in sorted(by_build.items())]
@@ -433,6 +435,18 @@ def build_gallery(dataset: Path, only=None, workers: int = 1, force: bool = Fals
     page = out_dir / "index.html"
     page.write_text(PAGE.replace("__DATA__", data).replace("__REAL__", real_data), encoding="utf-8", newline="\n")
     return page
+
+
+def drop_stale(images: dict, live: set, img_dir: Path) -> list:
+    """Remove cached cards of builds no longer in the pairs (set aside by D24, D25) from
+    `images`, and their image files unless a live card uses the same file. Returns the keys."""
+    stale = sorted(set(images) - live)
+    keep = {f for k, v in images.items() if k in live for f in v.values() if isinstance(f, str)}
+    for key in stale:
+        for f in images.pop(key).values():
+            if isinstance(f, str) and f not in keep:
+                (Path(img_dir) / f).unlink(missing_ok=True)
+    return stale
 
 
 def _run_job(job):

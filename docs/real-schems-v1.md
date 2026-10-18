@@ -137,6 +137,11 @@ builder behind a publisher such as SchematicWorld), and 13 more were exported as
 Tiers are not stratified: test has no tier C build. All 12 `oversized_capture` builds are
 in train; 5 of the 8 `incomplete_listing` builds are in test.
 
+The tables are the seeded split. Two decisions are applied after it (`splits.json`,
+`overrides`), so no other build moves: D24 set the two landscape dioramas aside (from
+train), D25 the Richelieu cliff house (from test). Current: **train 253 / val 32 / test 31 /
+excluded 5**.
+
 The old `eval/real-eval-v1.json` stays on disk for its tests but is superseded by this
 split (D17, D19).
 
@@ -147,7 +152,8 @@ split (D17, D19).
 ```
 
 Every non-excluded build is read, cropped to the building, masked, measured and encoded as
-training targets: 319 in Phase 3, 317 since D24 set two landscape dioramas aside (Phase 3
+training targets: 319 in Phase 3, 317 since D24 set two landscape dioramas aside, 316 since
+D25 set the Richelieu cliff house aside (2026-10-17; it was test) (Phase 3
 fixes, 2026-10-12). The run is resumable and deterministic:
 
 * A build is skipped when its record matches its source sha256, the pipeline version and the
@@ -599,19 +605,20 @@ vary in scale, sometimes on purpose. `schemset/storey.py` measures floor-to-floo
 Confidence: 115 high, 38 medium, 111 low (mostly one storey, measured floor to roof), 53
 unknown (317 builds, after the Phase 3 fixes; the table above is from the first run).
 
-### Flags (normalize-5)
+### Flags (normalize-5, 316 builds since D25)
 
 | Flag | Meaning | Builds |
 | --- | --- | ---: |
-| `deep_cover_capped` | the depth cap turned more than 200 air voxels interior: halls, hollow shells, open ground floors, atria; review | 92 |
-| `large_opening` | more than 30% of the deep covered air is still exterior after the cap: canopies, station halls, barns, the Richelieu cliff house, the roofless brick tenement shell, and since normalize-5 the strips under deep, tall overhangs (ab-11663, the French embassy, the cathedral ab-13526) | 21 |
+| `deep_cover_capped` | the depth cap turned more than 200 air voxels interior: halls, hollow shells, open ground floors, atria; review | 91 |
+| `large_opening` | more than 30% of the deep covered air is still exterior after the cap: canopies, station halls, barns, the roofless brick tenement shell, and since normalize-5 the strips under deep, tall overhangs (ab-11663, the French embassy, the cathedral ab-13526) | 20 |
 | `deep_visible_ignored` | more than 15% of the blocks a straight horizontal line from outside reaches are ignored, at any depth: crawl spaces under raised floors | 5 |
-| `crop_aggressive` | the crop removed more than 50% of non-air blocks, usually a big terrain capture | 65 |
+| `crop_aggressive` | the crop removed more than 50% of non-air blocks, usually a big terrain capture | 64 |
 | `multi_building` | more than one large separate mass remains (at least 15% of the biggest and 500 blocks): compounds, rows, campuses; all are kept | 10 |
 | `crop_kept_landscape` | soft blocks (plants, turf, water) are over 10% of what the crop kept | 8 |
-| `ground_fallback` | more than 15% of the kept blocks would be below ground, so there is no ground: houses built into a slope | 4 |
+| `ground_fallback` | more than 15% of the kept blocks would be below ground, so there is no ground: houses built into a slope (the Richelieu cliff house, the fourth, is set aside: D25) | 3 |
 | `site_linear_removed` | a wall or fence line was cut back to 6 columns from the building | 3 |
 | `excluded_landscape_diorama` | D24: set aside (split "excluded"), not normalized | 2 |
+| `excluded_target_lost_terrain` | D25: set aside (split "excluded"), not normalized: the Richelieu cliff house, whose rooms lose the rock that formed their back walls | 1 |
 | `geometric_duplicate` | `schemset.dedupe` found the build in a duplicate pair | 0 |
 
 `interior_leak_suspect` and `crop_no_core` are retired: the opening rule replaced the first,
@@ -636,14 +643,14 @@ gets one card:
   veranda beyond that is ignored, like a hall interior. An eave strip counts as open only
   where it sees the sky along a path at least 2 up per 1 across, so a deep eave less than
   about twice as tall as it is deep is still capped at 6.
-- **`large_opening` builds (21; 11 under normalize-4)** still have much exterior air under
+- **`large_opening` builds (20; 11 under normalize-4)** still have much exterior air under
   cover after the cap: canopies, station halls, barns, a facade shell whose hollow has no
   roof, and since normalize-5 the strips under deep, tall overhangs.
 - **`deep_visible_ignored` builds (5)** have ignored blocks a horizontal line from outside
   reaches, at any depth: crawl spaces under raised floors, left as they are.
-- **`ground_fallback` builds (4)** are houses built into a slope. With no ground, their
-  buried parts are supervised, and rooms dug into the removed hill open up (the Richelieu
-  cliff house).
+- **`ground_fallback` builds (3)** are houses built into a slope. With no ground, their
+  buried parts are supervised. The fourth, the Richelieu cliff house, lost the rock that
+  formed its rooms' back walls and is set aside (D25).
 - **A wall with a coping attached to the building** merges into the building core and is
   kept. Only free-standing lines are cut.
 - **A rock layer under the whole build** (no open terrain anywhere) is kept as building.

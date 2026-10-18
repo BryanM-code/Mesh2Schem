@@ -712,6 +712,24 @@ def metric_subsets(pairs: list) -> dict:
     return {split: {**v, "counts": {k: len(x) for k, x in v.items()}} for split, v in sorted(out.items())}
 
 
+def prune_excluded(out: Path, index_rows: dict) -> list:
+    """Builds now excluded (D24, D25): their pair outputs (record and inputs) go, as
+    normalize's derived outputs do; the source never changes. Returns what was removed."""
+    import shutil
+    removed = []
+    for bid, row in sorted(index_rows.items()):
+        if row.get("split") != "excluded" or not bid or bid in (".", "..") or any(c in bid for c in "/\\:"):
+            continue
+        rec, folder = out / "records" / f"{bid}.json", out / "synthetic" / bid
+        if rec.is_file():
+            rec.unlink()
+            removed.append(f"records/{bid}.json")
+        if folder.is_dir():
+            shutil.rmtree(folder)
+            removed.append(f"synthetic/{bid}/")
+    return removed
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--dataset", type=Path, required=True)
@@ -730,6 +748,8 @@ def main(argv=None) -> int:
         raise SystemExit("refusing to write inside source/")
     (out / "records").mkdir(parents=True, exist_ok=True)
     index_rows = {r["id"]: r for r in json.loads((dataset / "index.json").read_text(encoding="utf-8"))["rows"]}
+    for gone in prune_excluded(out, index_rows):
+        print(f"  removed pair output of excluded build: {gone}")
     norm = json.loads((dataset / "normalized" / "index.json").read_text(encoding="utf-8"))
     rows = [dict(index_rows[b["id"]], split=b["split"]) for b in norm["builds"]
             if b.get("status") == "ok" and b["split"] != "excluded"]
