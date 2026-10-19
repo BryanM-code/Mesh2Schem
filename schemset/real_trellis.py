@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Phase 4: real-TRELLIS evaluation sets -- held-out builds through the real TRELLIS server.
 
-Usage:  python -m schemset.real_trellis prepare  --dataset data/real-schems-v1 --set smooth
+Usage:  python -m schemset.real_trellis prepare  --dataset data/real-schems-v1 --set smooth [--workers N]
         python -m schemset.real_trellis generate --dataset data/real-schems-v1 --set smooth
-        python -m schemset.real_trellis place    --dataset data/real-schems-v1 --set smooth
+        python -m schemset.real_trellis place    --dataset data/real-schems-v1 --set smooth [--workers N] [--resume]
         python -m schemset.real_trellis trials   --dataset data/real-schems-v1 --sigmas 0.6 0.8 1.0
         python -m schemset.real_trellis status   --dataset data/real-schems-v1
 
 The synthetic inputs imitate TRELLIS on photos of real buildings; these sets check the
 imitation on held-out builds and are what a model is scored on for real TRELLIS geometry
-(D17). Only val and test builds are used -- never train. Two photo sets of the same 25 builds:
+(D17). The evaluation sets use only val and test builds -- never train. Two photo sets of the
+same 25 builds, and one set of training inputs:
 
     smooth   the main set (`real_trellis_smooth/`). The photo is rendered from a SMOOTHED
              version of the build: its outside (`schemset.meshify`, glass dark like real
@@ -22,6 +23,10 @@ imitation on held-out builds and are what a model is scored on for real TRELLIS 
              and the light so it matches in lightness (`trials`, docs/pairs-v1.md)
     blocky   the stress test (`real_trellis/`): the photo is a render of the raw block build,
              so TRELLIS reproduces Minecraft's stair-stepped roofs
+    train    Phase 5 training inputs (`real_trellis_train/`): the smooth photo of every
+             train build through TRELLIS, so a model also trains on real TRELLIS output
+             (its filled porches and courtyards, its colours) beside the synthetic pairs.
+             Train builds only; never scored as an evaluation set
 
 Steps:
 
@@ -76,7 +81,7 @@ N_BUILDS = 25
 SELECT_SEED = 20261014
 TRELLIS_SEED = 1
 SPLITS = ("val", "test")
-SETS = {"smooth": "real_trellis_smooth", "blocky": "real_trellis"}
+SETS = {"smooth": "real_trellis_smooth", "blocky": "real_trellis", "train": "real_trellis_train"}
 SMOOTH_SIGMA = 0.6                 # blocks; chosen by `trials`: TRELLIS stair45 / roughness p50 0.24 / 8.3 deg
 PHOTO_LIGHT = (0.23, 0.77)         # strong sun, little ambient: ambient + sun * |n . sun| (no cast
                                    # shadows; `trials --lights`, and two full runs either side)
@@ -112,6 +117,12 @@ def select(dataset: Path, n: int = N_BUILDS) -> list:
             if by_cat[cat] and len(out) < n:
                 out.append(by_cat[cat].pop())
     return out
+
+
+def select_train(dataset: Path) -> list:
+    """Every normalized train build, sorted (the `train` set: training inputs, never scored)."""
+    norm = json.loads((dataset / "normalized" / "index.json").read_text(encoding="utf-8"))
+    return sorted(b["id"] for b in norm["builds"] if b.get("status") == "ok" and b["split"] == "train")
 
 
 # --------------------------------------------------------------------------- photos
@@ -156,29 +167,42 @@ def render_set_photo(mesh, name: str, sigma: float = SMOOTH_SIGMA, exposure: flo
     return render_photo(smooth_surface(glass_look(mesh, PHOTO_GLASS), sigma), light=(a * g, s * g))
 
 
-def prepare(dataset: Path, name: str, n: int = N_BUILDS, sigma: float = SMOOTH_SIGMA,
-            ids=None, out: Path = None, exposure: float = None, light=None) -> list:
-    from synth.trellis_compare import IMAGE_SIZE, VIEW_PITCH, VIEW_YAW
-
+def _render_one(job) -> str:
+    """One build's photo (a process-pool job): (dataset, name, id, folder, sigma, exposure, light)."""
     from .meshify import meshify_npz
+    dataset, name, bid, d, sigma, exposure, light = job
+    mesh, _, _ = meshify_npz(Path(dataset) / "normalized" / f"{bid}.npz")
+    render_set_photo(mesh, name, sigma, exposure, light).save(Path(d) / "photo.png")
+    return bid
+
+
+def prepare(dataset: Path, name: str, n: int = N_BUILDS, sigma: float = SMOOTH_SIGMA,
+            ids=None, out: Path = None, exposure: float = None, light=None, workers: int = 1) -> list:
+    from synth.trellis_compare import IMAGE_SIZE, VIEW_PITCH, VIEW_YAW
 
     out = out or set_dir(dataset, name)
     out.mkdir(parents=True, exist_ok=True)
-    ids = ids or select(dataset, n)
+    ids = ids or (select_train(dataset) if name == "train" else select(dataset, n))
     rows = {r["id"]: r for r in json.loads((dataset / "index.json").read_text(encoding="utf-8"))["rows"]}
-    done = []
+    todo = []
     for bid in ids:
-        d = out / bid
-        d.mkdir(exist_ok=True)
-        if not (d / "photo.png").is_file():
-            mesh, _, _ = meshify_npz(dataset / "normalized" / f"{bid}.npz")
-            render_set_photo(mesh, name, sigma, exposure, light).save(d / "photo.png")
-        done.append({"id": bid, "split": rows[bid]["split"], "category": rows[bid]["category_top"],
-                     "building_category": rows[bid]["building_category"]})
-        print(f"  {bid}: photo ready", flush=True)
+        (out / bid).mkdir(exist_ok=True)
+        if not (out / bid / "photo.png").is_file():
+            todo.append((str(dataset), name, bid, str(out / bid), sigma, exposure, light))
+    if workers > 1 and len(todo) > 1:
+        from concurrent.futures import ProcessPoolExecutor
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            for bid in pool.map(_render_one, todo):
+                print(f"  {bid}: photo ready", flush=True)
+    else:
+        for job in todo:
+            print(f"  {_render_one(job)}: photo ready", flush=True)
+    done = [{"id": bid, "split": rows[bid]["split"], "category": rows[bid]["category_top"],
+             "building_category": rows[bid]["building_category"]} for bid in ids]
     sel = {"set": name, "builds": done, "seed": SELECT_SEED, "trellis_seed": TRELLIS_SEED,
-           "view": {"yaw": VIEW_YAW, "pitch": VIEW_PITCH, "size": IMAGE_SIZE}, "splits": list(SPLITS)}
-    if name == "smooth":
+           "view": {"yaw": VIEW_YAW, "pitch": VIEW_PITCH, "size": IMAGE_SIZE},
+           "splits": ["train"] if name == "train" else list(SPLITS)}
+    if name in ("smooth", "train"):
         sel["photo"] = {"sigma_blocks": sigma, "light": list(PHOTO_LIGHT if light is None else light),
                         "glass": PHOTO_GLASS, "exposure": PHOTO_EXPOSURE if exposure is None else exposure,
                         "cells_per_block": SMOOTH_CELLS_PER_BLOCK}
@@ -196,11 +220,21 @@ def generate(dataset: Path, name: str, limit: int = 0, out: Path = None) -> int:
     todo = [b["id"] for b in sel["builds"] if not (out / b["id"] / "trellis.glb").is_file()]
     if limit:
         todo = todo[:limit]
+    failed = []
     for i, bid in enumerate(todo, 1):
         t0 = time.time()
-        trellis_generate(out / bid / "photo.png", out / bid / "trellis.glb", seed=sel["trellis_seed"])
+        try:
+            trellis_generate(out / bid / "photo.png", out / bid / "trellis.glb", seed=sel["trellis_seed"])
+        except Exception as e:  # one bad build must not end a run of hours; a dead server does
+            if not server_up():
+                raise SystemExit(f"TRELLIS server went down at {bid} ({e}); run generate again to resume")
+            failed.append(bid)
+            print(f"  {i}/{len(todo)} {bid}: FAILED ({e})", flush=True)
+            continue
         print(f"  {i}/{len(todo)} {bid}: {time.time() - t0:.0f} s", flush=True)
-    return len(todo)
+    if failed:
+        print(f"{len(failed)} failed (run generate again to retry): {' '.join(failed)}", flush=True)
+    return len(todo) - len(failed)
 
 
 # --------------------------------------------------------------------------- alignment
@@ -500,11 +534,19 @@ def measure(dataset: Path, bid: str, glb: Path, input_path: Path, scales=(1.0,),
             "stats": stats, "status": "ok", "seconds": round(time.time() - t0, 1)}
 
 
-def place(dataset: Path, name: str, out: Path = None, previous: Path = None, only=None) -> dict:
+def _place_one(job):
+    """One build's placement (a process-pool job): (dataset, id, folder) -> (id, `measure`)."""
+    dataset, bid, d = job
+    return bid, measure(Path(dataset), bid, Path(d) / "trellis.glb", Path(d) / "input.npz")
+
+
+def place(dataset: Path, name: str, out: Path = None, previous: Path = None, only=None,
+          workers: int = 1, resume: bool = False) -> dict:
     """Align, voxelise, validate and measure every generated mesh of a set (`measure`);
     `previous` (an earlier index.json of the set) supplies the residuals before the alignment
     change. `only`: re-place just these builds, keeping the others' rows from the set's
-    index.json."""
+    index.json. `resume`: keep every build already placed (its stats.json and input.npz).
+    `workers` > 1 places builds in parallel."""
     out = out or set_dir(dataset, name)
     sel = json.loads((out / "selection.json").read_text(encoding="utf-8"))
     index = json.loads((dataset / "pairs" / "index.json").read_text(encoding="utf-8"))
@@ -518,19 +560,26 @@ def place(dataset: Path, name: str, out: Path = None, previous: Path = None, onl
     kept = {}
     if only and (out / "index.json").is_file():
         kept = {r["id"]: r for r in json.loads((out / "index.json").read_text(encoding="utf-8"))["builds"]}
-    rows = []
+    by_id, todo = {}, []
     for b in sel["builds"]:
         bid = b["id"]
-        if only and bid not in only and bid in kept:
-            rows.append(kept[bid])
-            continue
         d = out / bid
-        row = dict(b)
-        if not (d / "trellis.glb").is_file():
-            row["status"] = "awaiting_trellis" if (d / "photo.png").is_file() else "awaiting_photo"
-            rows.append(row)
+        if only and bid not in only and bid in kept:
+            by_id[bid] = kept[bid]
             continue
-        row.update(measure(dataset, bid, d / "trellis.glb", d / "input.npz"))
+        if not (d / "trellis.glb").is_file():
+            by_id[bid] = {**b, "status": "awaiting_trellis" if (d / "photo.png").is_file() else "awaiting_photo"}
+            continue
+        if resume and (d / "stats.json").is_file() and (d / "input.npz").is_file():
+            prev = json.loads((d / "stats.json").read_text(encoding="utf-8"))
+            if prev.get("status") == "ok":
+                by_id[bid] = prev
+                continue
+        todo.append((str(dataset), bid, str(d)))
+
+    def finish(bid, measured):
+        row = dict(next(b for b in sel["builds"] if b["id"] == bid))
+        row.update(measured)
         metrics, placement = row["validation"], row["placement"]
         if bid in before:
             pv = before[bid].get("validation", {})
@@ -538,11 +587,21 @@ def place(dataset: Path, name: str, out: Path = None, previous: Path = None, onl
                                           "failures": pv.get("failures")}
         row["synthetic"] = [{"variant": p["variant"], "iou": p["validation"]["iou"], **p["stats"]}
                             for p in synthetic.get(bid, [])]
-        (d / "stats.json").write_text(json.dumps(row, indent=1), encoding="utf-8")
-        rows.append(row)
+        (out / bid / "stats.json").write_text(json.dumps(row, indent=1), encoding="utf-8")
+        by_id[bid] = row
         print(f"  {bid}: IoU {metrics.get('iou')} yaw {placement['yaw_deg']} shift {placement['shift_cells']}"
               f" residual {metrics.get('shift_residual_cells')}"
               f" {'FAIL ' + str(metrics['failures']) if metrics['failures'] else 'ok'}", flush=True)
+
+    if workers > 1 and len(todo) > 1:
+        from concurrent.futures import ProcessPoolExecutor
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            for bid, measured in pool.map(_place_one, todo):
+                finish(bid, measured)
+    else:
+        for job in todo:
+            finish(*_place_one(job))
+    rows = [by_id[b["id"]] for b in sel["builds"]]
     res = {"version": "real-trellis-2", "set": name, "photo": sel.get("photo"), "builds": rows,
            "gap": gap_report(rows), "alignment": alignment_summary(rows),
            "caveats": ["The photo is a render of the build (thumbnail colours), not a photograph.",
@@ -665,17 +724,20 @@ def main(argv=None) -> int:
     ap.add_argument("--trial-ids", nargs="*", default=None)
     ap.add_argument("--previous", type=Path, help="an earlier index.json of the set (residuals before)")
     ap.add_argument("--only", nargs="*", default=None, help="place: re-place just these builds")
+    ap.add_argument("--workers", type=int, default=1, help="prepare / place: builds in parallel")
+    ap.add_argument("--resume", action="store_true", help="place: keep builds already placed")
     args = ap.parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     dataset = args.dataset.resolve()
     if args.cmd == "prepare":
-        done = prepare(dataset, args.set, args.n, args.sigma)
+        done = prepare(dataset, args.set, args.n, args.sigma, workers=args.workers)
         print(f"{len(done)} photos ready in {set_dir(dataset, args.set)}")
     elif args.cmd == "generate":
         print(f"generated {generate(dataset, args.set, args.limit)}")
     elif args.cmd == "place":
-        res = place(dataset, args.set, previous=args.previous, only=set(args.only) if args.only else None)
+        res = place(dataset, args.set, previous=args.previous, only=set(args.only) if args.only else None,
+                    workers=args.workers, resume=args.resume)
         print(json.dumps(res["alignment"], indent=1))
         print(json.dumps(res["gap"], indent=1))
     elif args.cmd == "trials":

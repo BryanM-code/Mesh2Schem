@@ -90,6 +90,7 @@ pairs/
     selection.json, <id>/photo.png, <id>/trellis.glb, <id>/input.npz, <id>/stats.json, index.json
     trials/sigma_<s>/, trials.json   the smoothing trials that chose the photo sigma
   real_trellis/                real-TRELLIS evaluation, blocky photos: the stress test (same layout)
+  real_trellis_train/          real-TRELLIS training inputs: every train build, smooth photos (same layout; Phase 5)
   history/pairs-1/             pairs-1's index.json, calibration.json and real-TRELLIS index (the "before")
   gallery/index.html           review gallery (schemset.pairs_gallery)
 ```
@@ -713,6 +714,46 @@ How to read it:
   recall 0.39 against 0.57; paired, synthetic v1 +0.14) and makes up more (spurious 0.34
   against 0.13); real photos the least and the most (0.33, 0.45). Synthetic colours follow
   the build more closely too (0.31 against 0.14; real photos 0.05).
+
+### Training inputs: `real_trellis_train/` (Phase 5)
+
+Not an evaluation set: the smooth photo of **every train build** (253) through TRELLIS, so
+a model can also train on real TRELLIS output beside the synthetic pairs (Real2Minecraft
+`training.data trellis` adds the valid ones to the pair cache; `train --trellis-share`).
+Same photo settings as the smooth set (σ 0.6 block, the chosen light), seed 1, the same
+placement and validation. Made 2026-10-18: photos 12 min (6 workers), TRELLIS 3.7 h (52 s a
+build, no failures), placement 16 min (6 workers). Val and test builds never enter it.
+
+- **244 valid**, 9 rejected by validation: 6 meshes lost too much of the building
+  (`input_misses_building`, coverage 0.37–0.50: the French embassy, Hotel Berni, the Kimbell,
+  the L-shaped motel, the marina hotel, the warehouse row), 1 below the IoU band (the colonial
+  house, 0.17), 2 frames off by more than the tolerance (the fire station, a warehouse).
+  30 builds are flagged `low_iou` (22 of them kept).
+
+On 253 builds, ten times the evaluation sets, p10 / p50 / p90:
+
+| statistic | TRELLIS on real photos (reference, 150) | TRELLIS on smooth photos, train builds (253) | synthetic pairs-3, the same builds (1,012) |
+| --- | --- | --- | --- |
+| stair45 | 0.02 / 0.25 / 0.70 | 0.04 / 0.21 / 0.55 | 0.04 / 0.19 / 0.48 |
+| normal roughness | 4.2 / 8.1 / 13.6° | 3.2 / 6.7 / 10.3° | 3.9 / 7.4 / 10.4° |
+| fill_gain | 2.69 / 5.45 / 10.92 | 2.56 / 4.66 / 9.32 | 2.94 / 5.15 / 10.01 |
+| rough3 | 0.018 / 0.029 / 0.074 | 0.018 / 0.051 / 0.130 | 0.026 / 0.052 / 0.099 |
+| L\* | 11.0 / 21.9 / 33.7 | 11.2 / 24.9 / 39.5 | 11.3 / 21.3 / 36.8 |
+| C\* | 2.8 / 6.7 / 11.6 | 2.7 / 8.2 / 18.8 | 3.7 / 7.2 / 12.2 |
+| nbr_de | 1.53 / 2.48 / 4.99 | 1.18 / 2.23 / 3.86 | 1.47 / 2.93 / 5.20 |
+| feature recall (`detail_geo`) | – | 0.16 / 0.40 / 0.66 | 0.33 / 0.58 / 0.83 |
+| spurious | – | 0.23 / 0.33 / 0.43 | 0.08 / 0.13 / 0.26 |
+| colour detail | – | 0.02 / 0.15 / 0.33 | 0.15 / 0.31 / 0.51 |
+| IoU with the target volume | – | 0.42 / 0.67 / 0.82 | 0.59 / 0.77 / 0.86 |
+
+The 25-build findings hold at ten times the builds: blockiness and lightness match (stair45
+0.21 and 0.19 against 0.25; L\* p50 24.9 and 21.3 against 21.9; paired, synthetic minus
+TRELLIS, median L\* −1.3), and so does the gap. TRELLIS keeps less of the build (feature
+recall 0.40 against 0.58), makes up more (spurious 0.33 against 0.13), its colours follow the
+build less (0.15 against 0.31), and it lands further from the target volume (IoU 0.67
+against 0.77; paired median +0.09 for synthetic). Those are the differences these inputs
+bring into training. Their C\* reaches higher than the reference's (p90 18.8 against 11.6):
+some smooth photos are more colourful than photographs.
 
 ## Real photos, end to end (`schemset.real_photo`)
 
