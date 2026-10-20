@@ -270,3 +270,233 @@ Next levers, cheapest first:
    plan section 8), then the photo projected onto the grid (geometry; for a real photo the
    camera has to be estimated).
 4. **More builds**, the only fix for memorisation.
+
+## Photo-first pipeline, tests A and B (2026-10-18/19)
+
+After r3 the question was whether a pipeline without a 3D generator would do better. Code:
+Real2Minecraft `photofirst/` (its README has the commands), separate from the TRELLIS
+pipeline. It reuses only the U-Net, the tiling and the scorer. Data:
+`data/real-schems-v1/photofirst/`.
+
+```
+photo -> front end: MoGe-2 depth + the building mask -> the blocks the photo shows
+      -> completion model (the U-Net, trained on what one viewpoint shows -> the build) -> blocks
+```
+
+### What one photo shows
+
+The view of the evaluation photos (yaw 35, pitch 12) was ray-cast through every target
+(`photofirst.visibility`, which also counts every block face with a clear line to the
+camera).
+
+- **One photo shows about 45% of a build's outer blocks** (median over the 63 val and test
+  builds; p10–p90 39–54%), two photos from opposite corners 81%, four 92%.
+- **A perfect copy of only the visible blocks scores IoU 0.43** on the smooth val builds,
+  more than TRELLIS, the r1/r3 models or sculpture mode (0.31–0.32).
+- **About half of TRELLIS's errors contradict the photo itself** (48% with the rays alone,
+  before roofs seen at a grazing angle counted): false solid on air the camera sees, visible
+  blocks it loses. The rest are in the part no photo shows.
+- Mirroring the visible side is a weak guess for the rest (right about a third of the
+  time); only 36% of footprints fill 90% of their rectangle.
+
+### Test A: completing exactly what the photo shows
+
+The completion model is training's U-Net, unchanged, on a new input: seen solid, seen air
+(where the camera sees past) and the seen blocks' colours (material colours under random
+exposure). Each train build is seen from 16 viewpoints (pitch 5–30). Run pf-a1: 12,000
+steps, best at 7,000; unlike the TRELLIS runs it was still improving past 4,000 steps.
+
+| val, the 12 real-TRELLIS builds, the photo TRELLIS got | photo-first, exact visible blocks | visible blocks alone | r1 | r3 | sculpture | building |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| IoU | **0.522** | 0.432 | 0.312 | 0.317 | 0.320 | 0.204 |
+| F1 within 1 block | **0.855** | 0.723 | 0.794 | 0.797 | 0.787 | 0.651 |
+| shape | 0.461 | – | 0.445 | 0.491 | 0.495 | 0.520 |
+| material | **0.177** | – | 0.079 | 0.080 | 0.056 | 0.017 |
+| ΔE | **16.7** | – | 28.3 | 26.0 | 25.9 | 36.4 |
+| exact blocks | **0.068** | – | 0.030 | 0.018 | 0.010 | 0.004 |
+
+On all 32 val builds and from each corner the same: IoU 0.53 (the visible blocks alone
+0.44–0.46), exact blocks 0.09, material 0.18–0.19. **The ceiling is far above the TRELLIS
+pipeline.**
+
+### Test B: what the front end recovers
+
+The front end runs MoGe-2 (`Ruicheng/moge-2-vitl-normal`) on the photo, keeps the
+building's pixels, and turns the points into the build's frame:
+- the frame is given, or estimated from the point map's normals (pitch only, walls at
+  right angles; up direction off by 1.5° median, 3.9° p90);
+- the points are scaled to the target's height (as TRELLIS's placement is);
+- a block is seen solid where points fall half a block behind the surface;
+- the air in front of the points and along the rays through background pixels is seen air.
+
+The result is placed in the target's frame by the best integer shift (and, for an
+estimated frame, quarter turn). Scored against what that photo truly shows:
+
+| 25 evaluation builds | recall, exact / within 1 | precision, exact / within 1 | solid on air the photo shows |
+| --- | --- | --- | ---: |
+| orthographic renders (the photos TRELLIS got), camera known, depth stretched | 0.44 / 0.80 | 0.45 / 0.81 | 3.4% |
+| **perspective renders (`photofirst.render`, 50° lens), camera known** | 0.52 / **0.85** | 0.51 / **0.86** | **3.1%** |
+| perspective renders, camera estimated from the photo | 0.38 / 0.68 | 0.52 / 0.85 | 2.3% |
+| TRELLIS's input (its placement used the target: height, yaw, shift) | **0.74** / **0.88** | 0.38 / 0.76 | 10.6% |
+
+- **On orthographic renders MoGe flattens the depth** (relief 0.76 of the truth, median):
+  it reads depth from perspective. Perspective renders fix that; they also need no depth
+  stretch (it lowers the scores).
+- **The front end is much cleaner than TRELLIS** (3% against 11% solid on visibly empty
+  air) and as complete within a block (0.85 against 0.88). But it places blocks exactly
+  less often (0.52 against 0.74): of the truly seen blocks it has 39% exactly, 37% one
+  block off, 23% further. Snapping walls and flat roofs to planes adds 0.02.
+- **Estimating the camera costs 0.17 of recall within a block** (0.85 to 0.68).
+- **Real photos** (the 10 with targets, all automatic): 0.51 of its blocks within a block of
+  the target (TRELLIS 0.47), but it covers 24% of the target's solid (TRELLIS 0.57). Large
+  landmarks (capitols, towers) fail on scale and coverage.
+
+### End to end: not better yet
+
+| val (12 builds) | IoU | F1 within 1 | material | exact blocks |
+| --- | ---: | ---: | ---: | ---: |
+| photo-first, perspective photo, camera known (pf-a1) | 0.258 | 0.695 | 0.042 | 0.009 |
+| photo-first, perspective photo, camera estimated (pf-a1) | 0.253 | 0.677 | 0.046 | 0.012 |
+| photo-first, the orthographic photo TRELLIS got (pf-a1) | 0.238 | 0.678 | 0.041 | 0.011 |
+| photo-first, real photos (the barn and Coleraine Church, pf-a1) | 0.232 | 0.711 | 0.060 | 0.015 |
+| TRELLIS pipeline, r1 | **0.312** | **0.794** | **0.079** | **0.030** |
+
+The completion model, given the front end's blocks, falls from IoU 0.52 to 0.25.
+Swapping one part of its input at a time for the truth (perspective, camera known, pf-a1;
+before the background rays were added):
+
+| input | IoU | precision | recall |
+| --- | ---: | ---: | ---: |
+| all from the front end | 0.176 | 0.24 | 0.57 |
+| front-end blocks, true seen air | 0.318 | 0.44 | 0.58 |
+| true blocks, front-end seen air | 0.300 | 0.37 | 0.70 |
+| true blocks, true seen air, the photo's colours | 0.503 | 0.67 | 0.69 |
+| all true | 0.497 | 0.64 | 0.72 |
+
+1. **Seen air matters most.** The model reads the air the camera sees as "keep empty". The
+   first front end marked only the air in front of the building's own pixels; rays through
+   background pixels fixed most of it (0.176 to 0.258).
+2. **Exact placement of the visible blocks is the binding limit.** With true seen air but
+   the front end's blocks the model reaches 0.318; each block a front-end wall is off costs
+   IoU twice (a false block, a missed one), and no completion can know where the wall
+   really is. End to end it misses 47% of the truly seen solid.
+3. **The photo's colours cost materials, not geometry** (0.503 IoU with them, material 0.058
+   against 0.177).
+4. A completion model trained on the front end's kind of errors (pf-a2: surface patches
+   moved one or two blocks, patches lost, spurious blocks, 70% of the seen air, photo-like
+   colours; validated on the front end's own val inputs every 1,000 steps) does not
+   close the gap: IoU 0.25 at step 1,000, then 0.22–0.24 to step 6,000, where it was
+   stopped. It became more forgiving within a block on true inputs (F1 within 1 block up
+   to 0.885) but cannot recover exact positions the input does not hold.
+
+### Verdict
+
+The completion half works and has a far higher ceiling than the TRELLIS pipeline; the
+front-end half is cleaner than TRELLIS but places surfaces less exactly, and end to end the
+photo-first pipeline scores 0.25 against TRELLIS's 0.31. Not worth switching to yet; worth
+keeping, in these directions:
+
+1. **A hybrid**: TRELLIS's geometry, the photo's seen air carving away what TRELLIS fills
+   (its fills on visibly empty air are 10.6%, the front end's seen air is wrong on solid
+   1.6% of the time), and the completion model on top.
+2. **Better visible geometry**: a stronger depth model (MoGe-3 is out), several photos (two
+   opposite corners see 81% of the outer blocks).
+3. **Training the completion model on real front-end outputs** (perspective renders of the
+   train builds through the front end), as r3 did for TRELLIS.
+
+### Hybrid, MoGe-3 and several photos (2026-10-19)
+
+Three follow-ups to the verdict above, on the same 12 val builds. Each build was rendered
+from its four corners (`photofirst.render --views 0 1 2 3`: yaw 35 + 90 k, the perspective
+look). The cameras are known when photos are fused; real photos would need them estimated.
+
+**MoGe-3** (`Ruicheng/moge-3-vitl`, August 2026; needs FlexGEMM on `triton-windows` 3.6,
+pinned in `photofirst/requirements.txt`) is barely better than MoGe-2 here:
+
+| front end, perspective photo | recall, exact / within 1 | precision, exact / within 1 | end to end IoU |
+| --- | --- | --- | ---: |
+| MoGe-2, camera known | 0.515 / 0.849 | 0.509 / 0.856 | 0.258 |
+| MoGe-3, camera known | 0.517 / 0.861 | 0.530 / 0.884 | 0.261 |
+| MoGe-2, camera estimated | 0.385 / 0.682 | 0.519 / 0.847 | 0.253 |
+| MoGe-3, camera estimated | 0.395 / 0.689 | 0.515 / 0.855 | 0.254 |
+
+**The hybrid** (`photofirst/hybrid.py`): TRELLIS's placed input (from the orthographic
+photo it was given) minus every block the photos show as empty space (the front end's
+seen air), through r1:
+
+| seen air from | carved input alone | r1 on it | F1 within 1 (r1) |
+| --- | ---: | ---: | ---: |
+| none (TRELLIS as it is) | 0.343 | 0.333 | 0.841 |
+| 1 photo | 0.380 | 0.358 | 0.854 |
+| 2 photos, opposite corners | **0.441** | 0.396 | **0.889** |
+| 4 photos | **0.441** | 0.400 | **0.889** |
+
+The carved input alone is better than r1 on it: r1 learned TRELLIS's filled input and puts
+some of the fill back. A 1-block margin (carving only air away from the photo's surfaces)
+keeps more true solid, but loses a little IoU.
+
+**Several photos, photo-first** (`photofirst/multiview.py`): each photo's front-end blocks in
+the target's frame, fused. A plain union adds every photo's misplaced surfaces. Space carving
+drops a block one photo saw solid where another saw clear through it, more than a block from
+that photo's own surface. pf-a1 completes the result:
+
+| photos | front end alone | photo-first end to end | F1 within 1 | true visible blocks alone | completion of the true blocks (ceiling) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.180 | 0.258 | 0.695 | 0.415 | 0.497 |
+| 2 adjacent (union) | 0.264 | 0.318 | 0.783 | 0.622 | 0.686 |
+| 2 opposite (union) | 0.300 | 0.397 | 0.865 | 0.764 | 0.873 |
+| 2 opposite (carved) | 0.314 | 0.413 | 0.885 | | |
+| 4 (union) | 0.349 | 0.387 | 0.856 | 0.891 | 0.938 |
+| **4 (carved)** | **0.406** | **0.450** | **0.907** | | |
+| TRELLIS pipeline, 1 photo (11 builds: one failed placement) | 0.343 | 0.333 | 0.841 | | |
+
+**Two photos from opposite corners show 81% of a build's outer blocks, four 92%; with
+them photo-first beats the TRELLIS pipeline (0.41–0.45 against 0.33).** With exact geometry
+the completion model nearly rebuilds the human build from two opposite photos (0.87) or four
+(0.94).
+
+**A completion model for several photos (pf-a3)**: every training sample fuses 1–4 random
+photos of the build, each with the front end's kind of errors (`data.FRONT_NOISE`), with
+space carving, and photo-like colours (`--views-per-sample 1 4 --front-noise
+--photo-colour`). Validated on the four-photo front-end inputs; best at step 2,000; stopped
+at 8,000 as it declined. On the front end's input (carved):
+
+| photos | IoU pf-a3 / pf-a1 | F1 within 1 | material pf-a3 / pf-a1 | exact blocks pf-a3 / pf-a1 |
+| --- | --- | ---: | --- | --- |
+| 1 | 0.223 / **0.258** | 0.629 | **0.091** / 0.042 | **0.026** / 0.009 |
+| 2 adjacent | 0.325 / **0.334** | 0.767 | **0.098** / 0.034 | **0.027** / 0.008 |
+| 2 opposite | **0.425** / 0.413 | 0.878 | **0.102** / 0.041 | **0.034** / 0.009 |
+| 4 | **0.464** / 0.450 | 0.903 | **0.104** / 0.033 | **0.033** / 0.008 |
+
+It adds a little geometry with several photos and roughly triples material and exact-block
+accuracy; with one photo it is worse than pf-a1. The four-photo row is slightly optimistic
+(the checkpoint was chosen on it). Four photos with pf-a3 against the TRELLIS pipeline (r1,
+one photo): IoU 0.464 against 0.333, F1 within 1 0.903 against 0.841, material 0.104 against
+0.084, exact blocks 0.033 against 0.033.
+
+### How errors pass through the chain
+
+Every stage is measured on the same builds, so the losses can be read off:
+
+| photo-first | 1 photo | 2 opposite | 4 photos |
+| --- | ---: | ---: | ---: |
+| ceiling: exact visible blocks + completion | 0.497 | 0.873 | 0.938 |
+| lost to what the photos do not show (1 − ceiling) | 0.50 | 0.13 | 0.06 |
+| lost to the front end's geometry (ceiling − end to end) | 0.24 | 0.46 | 0.49 |
+| end to end | 0.258 | 0.413 | 0.450 |
+
+1. **Errors pass through the chain about one for one; they are not multiplied.** The
+   completion model adds about +0.08 IoU whatever its input (0.415 → 0.497 on true visible
+   blocks, 0.180 → 0.258 on the front end's). A front-end error becomes an output error of the
+   same size.
+2. **A stage trained on another stage's errors can make a better input worse.** r1, trained on
+   TRELLIS's filled input, lowers the carved input from 0.441 to 0.40. Every learned stage
+   has to be trained on the input it will get (the lesson of r3 too).
+3. **Independent sources fused well cancel errors instead of adding them.** Carving TRELLIS
+   with the photos' seen air (+0.10 on the input), carving one photo with another (+0.06),
+   and more photos (+0.19 from 1 to 4) all lower the error.
+4. **With more photos the bottleneck moves.** With one photo, half the score is lost to what
+   it does not show. With four, almost none is, and the loss is the front end's geometry: the
+   exact placement of each photo's surfaces and the photos' registration.
+5. **Materials lose most at the colour step.** On true visible blocks material accuracy is
+   0.18; with the photo's colours, 0.04–0.06. The photos are much darker than the materials.
