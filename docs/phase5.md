@@ -500,3 +500,270 @@ Every stage is measured on the same builds, so the losses can be read off:
    exact placement of each photo's surfaces and the photos' registration.
 5. **Materials lose most at the colour step.** On true visible blocks material accuracy is
    0.18; with the photo's colours, 0.04–0.06. The photos are much darker than the materials.
+
+### Several photos registered by a model: MapAnything and Depth Anything 3 (2026-10-19/20)
+
+The four-photo results above assumed the cameras known. Here the photos alone go through a
+multi-view model that estimates the cameras and a 3D point per pixel together
+(`photofirst/front_mv.py`): **MapAnything** (`facebook/map-anything-apache`, Apache 2.0, in
+`r2m_train`) and **Depth Anything 3** (`depth-anything/DA3-LARGE-1.1`, in its own `r2m_da3`
+venv: it needs numpy < 2; its Hugging Face card says Apache 2.0, the DA3 repository's table
+CC BY-NC 4.0). Both can be given camera hints (intrinsics and poses at any scale). The 25
+evaluation builds (12 val, 13 test), four corner photos each; the reconstruction is placed in
+the target's frame from its cameras and refined against the target (turn ±6°, scale ±8%,
+shift: the placement training pairs use), so the scores are the reconstruction's shape, as
+for every input so far. End to end: pf-a3 on the 12 val builds.
+
+Hints: **rough** (each photo's direction within ±10°, its tilt within ±5°, the true focal
+length), **coarse** (direction within ±25°, tilt taken as level, focal within ±10%: about what
+"which side is this photo from" and EXIF give), **true** (the renders' cameras).
+
+| front end, hints | recall exact / within 1 | precision exact / within 1 | camera error | 90° flips | end to end IoU |
+| --- | --- | --- | ---: | ---: | ---: |
+| MapAnything, none | 0.282 / 0.545 | 0.445 / 0.763 | 24.3° | 6 / 25 | 0.268 |
+| MapAnything, rough | 0.534 / **0.907** | 0.467 / **0.839** | 5.3° | 0 | **0.348** |
+| MapAnything, coarse | 0.343 / 0.725 | 0.275 / 0.605 | 17.7° | 0 | 0.223 |
+| MapAnything, true | 0.613 / 0.940 | 0.545 / 0.915 | 0.3° | 0 | 0.436 |
+| DA3, none | 0.293 / 0.625 | 0.394 / 0.716 | 8.1° | 1 | 0.206 |
+| DA3, rough | 0.486 / 0.866 | 0.433 / 0.777 | 5.4° | 0 | 0.295 |
+| DA3, coarse | 0.342 / 0.701 | 0.283 / 0.588 | 17.9° | 0 | 0.198 |
+| DA3, true | 0.595 / 0.936 | 0.560 / 0.916 | 0.0° | 0 | 0.417 |
+| MapAnything, side labels + tilt from the photo (direction ±25°, tilt ±3°) | 0.460 / 0.827 | 0.398 / 0.748 | 10.8° | 0 | 0.272 |
+| for reference: TRELLIS pipeline (r1), 1 photo | | | | | 0.333 |
+| for reference: MoGe-2 per photo, cameras known, carved | | | | | 0.464 |
+
+1. **MapAnything is the better front end at every hint level.** DA3 flips cameras less often
+   on its own, but its depth is less consistent with its cameras (the placement's scale
+   search ends at its limit on most builds).
+2. **Rough hints are what make several photos work**: no flips, 91% of the visible blocks
+   within one block, and end to end above the TRELLIS pipeline (0.348 against 0.333).
+3. **Coarse hints are worse than none.** The models follow the hints rather than correct
+   them, so a 25° error in the hint becomes an 18° camera error. Using a coarse hint only to
+   break ties (keep the photos-only result unless its cameras contradict the user's sides:
+   6 of 25 builds switch) gives recall within 1 of 0.71 against 0.55, still far below rough
+   hints. Side labels with the tilt measured from the photo (±3°) are better than coarse
+   hints but still far from rough ones (0.827 against 0.907 within 1, end to end 0.272 against
+   0.348): the direction error is what hurts. **A real multi-photo app needs camera hints good
+   to about 10°**: a phone's compass
+   heading (EXIF `GPSImgDirection`) for the direction and the photo itself for the tilt
+   (a depth model's walls give it to about 2°, `front.frame_from_normals`).
+4. **The largest builds still fail** (recall within 1 of 0.60–0.71 on four of them): at the
+   model's 518-pixel input a 150-block build gets about three pixels a block.
+5. **Space carving across the photos** (`to_grid(..., carve=True)`, as `data.fuse_views`)
+   raises precision but, where the photos do not line up exactly, deletes true walls one
+   photo saw. On DA3 with rough hints: precision within 1 0.78 → 0.91, recall within 1
+   0.87 → 0.68, end to end 0.295 → 0.255. Not used: the registration is not exact enough.
+
+### Why the outputs look like "block vomit"
+
+The block scores count exact voxels; they do not say why the outputs look wrong. Three
+measures, on the same builds, with the human builds as the reference:
+
+**Does it look like the human build?** (`photofirst/looks.py`.) Output and human build
+rendered the same way from two corners and compared with DINOv2 image features (ViT-L/14;
+`global`: whole image, `patch`: local structure). The reference rows place the scale:
+
+| | global | patch |
+| --- | ---: | ---: |
+| a different human build | 0.553 | 0.507 |
+| rule-based building mode (D18 baseline) | 0.626 | 0.552 |
+| photo-first, 4 photos (pf-a3, MoGe, cameras known) | 0.690 | 0.641 |
+| TRELLIS pipeline (r1) | 0.696 | 0.642 |
+| the human build's geometry in one material | 0.854 | 0.797 |
+| the human build with every block a full cube | 0.942 | 0.892 |
+
+The outputs are a third of the way from "some other building" to the human build. Full cubes
+instead of stairs and slabs cost little; one material instead of the build's palette costs
+more; the outputs' geometry costs most: **roof form, openings and silhouette first, then
+materials**.
+
+**Not too much noise, too little structure.** Statistics without a target
+(`training/quality.py`) over the visible blocks: the outputs are *more* uniform than the human
+builds (neighbouring blocks of one material 0.79 against 0.72; materials making up 90% of
+the blocks 6.5 against 10.2; single odd blocks 3.6% against 7.8%), and use stairs and slabs
+and glass about as often. What is wrong is where things are: within one block of the human
+build's own, stairs are found with F1 0.44–0.49 and face the right way half the time, thin
+parts (fences, panes, trapdoors) are found a quarter of the time, glass with F1 0.22–0.48.
+Even given the exact visible blocks with their true colours, the completion model's shapes
+are right as often as "every block a full cube" (0.48–0.54 against 0.51) and its materials
+14–22% of the time.
+
+**Colour: the photos hold little material information.** Every truly visible block's most
+frontal face sampled in the photos through the *true* cameras (no reconstruction error), the
+brightest photo kept, then the nearest material by colour:
+
+| colour as | material exact | colour difference (ΔE, median) |
+| --- | ---: | ---: |
+| photographed | 0.009 | 34.2 |
+| one exposure gain per build (fitted to the truth) | 0.097 | 15.1 |
+| one gain per face direction (fitted to the truth) | 0.124 | 12.6 |
+| hue only (chromaticity) | 0.214 | 12.1 |
+| the materials' own colours (no photo) | 0.836 | 0 |
+
+The light and exposure of the photos, not the reconstruction, lose most of it; the models'
+0.09–0.10 is about what plain matching gets. On the front end's own blocks it is worse: a
+colour classifier on 300,000 seen blocks of the real training pairs (nearest centroid,
+fitted on half the builds) gets 2–3% of the materials, below always naming the most common
+one (11%); a block's colour mixes its neighbours' (its points are placed to about a block).
+Materials have to come from colour averaged over whole surfaces and from priors learned on
+the human builds (what is used for roofs, walls, trim).
+
+A rule from the human builds that did not help: 96% of their roof stairs on a slope face up
+the slope; turning the outputs' roof stairs that way changed facing from 0.64 to 0.62.
+
+### Real front-end pairs and iterative completion (2026-10-20)
+
+**Real training pairs** (`photofirst/mv_pairs.py`). Every training build was rendered from
+8 directions round it (`render --train-views 8`: its own 16 viewpoints thinned, the
+evaluation photos' look, a random sun direction and ±25% exposure per build; seen sets not
+cast, the target is the whole build). Six photo sets per build (two of four photos, two of
+three, two of two: `front_mv.view_subsets`, about as people walk round a building) go through
+MapAnything with rough hints; the reconstruction is placed on the target (cameras, then the
+target refinement, fast: a coarse then fine turn and scale) and turned into blocks at two
+cells per block (`to_grid(res=2)`: what the points show below a block: slopes, steps,
+slabs). That is the model's own input grid, no repetition. 1,518 pairs, 253 builds.
+Training mixes them (70%) with the simulated inputs (`--real-pairs ma_rough`).
+
+**Iterative completion** (`photofirst/masked.py`, MaskGIT on block grids). One pass takes
+each block's most likely shape and material separately, so where the photos allow several
+good answers every block takes the safest one, and uncertain details (posts, frame timbers,
+window rhythms) come out as scattered single blocks: the outputs' streaks and smears are the
+completion model's, not the front end's (its blocks are compact). The masked model also sees
+blocks already decided (embeddings of shape and material added after the stem); in
+training a random share of the target's supervised blocks is given (masked share cos(πu/2),
+u uniform) and the loss is on the rest; decoding runs several passes, sampling the
+undecided blocks' shapes (Gumbel, temperature falling to 0) and fixing the surest each pass
+(cosine schedule), so later blocks follow earlier ones. Inside blocks are never fed back
+(training never gives them).
+
+**pf-m1: the masked model on the simulated inputs** (pf-a3's training data and settings,
+started from pf-a3, stopped at 2,000 steps; best on the front-end inputs at 1,000). On the
+four-photo MapAnything inputs (rough hints), the 12 val builds:
+
+| | IoU | F1 within 1 | material | stairs F1 | thin F1 | glass F1 | stair facing | lone blocks | looks (global / patch) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| pf-a3, one pass | **0.348** | 0.844 | 0.102 | 0.44 | 0.29 | 0.32 | **0.64** | 0.1% | 0.641 / 0.619 |
+| pf-m1, one pass | 0.333 | 0.842 | 0.105 | 0.42 | 0.35 | 0.34 | 0.54 | 0.1% | 0.650 / 0.625 |
+| pf-m1, 8 passes, sampled (τ = 1) | 0.334 | **0.845** | 0.106 | 0.44 | **0.38** | 0.34 | 0.49 | 1.2% | 0.638 / 0.620 |
+| pf-m1, 8 passes, greedy (τ = 0) | 0.334 | 0.843 | **0.106** | 0.43 | 0.34 | 0.34 | 0.51 | 0.1% | **0.653 / 0.627** |
+
+The block scores barely move; what moves is how the build reads. Decoded greedily, pf-m1's
+roofs come out as stepped stairs and slabs where pf-a3 left a grey cap, and walls show a
+regular frame or window rhythm where pf-a3 smeared materials (ab-6183, the paradise hotel).
+Sampling (τ = 1) adds lone blocks and looks worse. The posts under eaves remain.
+
+**pf-b1: trained on the real pairs** (70% of samples from them, 30% simulated as pf-a3;
+started from pf-a3; 6,000 steps of 6; best on the four-photo half-block inputs at 4,000).
+On those inputs (`ma_rough_res2`, the 12 val builds; pf-a3 never saw half-block inputs: on
+block inputs it gets 0.348):
+
+| | IoU | F1 within 1 | shape | material | ΔE | exact | stairs F1 | glass F1 | facing | palette90 | stairs + slabs | looks |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| pf-a3 | 0.343 | 0.817 | 0.467 | 0.086 | 27.6 | 0.014 | 0.44 | 0.23 | **0.62** | 7.4 | 0.42 | **0.633** / 0.602 |
+| pf-b1 | **0.364** | **0.865** | **0.502** | **0.123** | **24.5** | **0.043** | 0.45 | **0.34** | 0.51 | 9.0 | 0.27 | 0.624 / 0.600 |
+| human builds | | | | | | | | | | 10.2 | 0.45 | |
+
+Training on the front end's own output is the clearest gain of the round: materials +43%,
+exact blocks ×3, windows placed much better, a palette closer to the human builds', half
+the stray posts. It leans on full cubes (stairs and slabs 0.27 of the visible blocks against
+0.45), and the overall look does not move: some builds read far better (the paradise hotel's
+white walls and glass bands), others take the wrong palette (the newspaper turns cream).
+
+With two photos (opposite corners) pf-b1 gets IoU 0.340 (pf-a3 0.297), F1 within 1 0.829,
+material 0.107: two photos with pf-b1 match the TRELLIS pipeline (0.333 from one photo).
+
+**pf-bm1: the masked model on the real pairs** (pf-b1's data, `--masked`, from pf-a3)
+**failed**: on the four-photo inputs one pass gives IoU 0.300 (pf-b1 0.364), eight passes
+0.250 sampled and 0.239 greedy. It over-fills: precision 0.338 → 0.257 from one pass to
+eight while recall rises 0.756 → 0.833. Decided solid blocks pull their neighbours solid
+pass after pass (thick walls, filled volumes), and sampling leaves 5% lone blocks and 7%
+posts: the "block vomit" made worse. Training only ever shows the model correct decided
+blocks; decoding shows it its own mistakes, more of them on the noisier real input
+(exposure bias). pf-m1 on the simulated input went the other way (precision 0.460 →
+0.479, recall 0.585 → 0.519).
+
+**pf-bm2: the masked model trained on its kind of mistakes**: from pf-b1, `--masked
+--wrong-tokens 0.15` (15% of the decided blocks given in training are wrong: solid for air,
+air for solid, another material), validated with greedy decoding; best at 1,000 of 4,000
+steps (its validation then drifted down). Four photos:
+
+| | IoU | F1 within 1 | precision | material | exact | thin F1 | glass F1 | looks |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| pf-b1, one pass | **0.364** | **0.865** | **0.413** | **0.123** | 0.043 | 0.35 | 0.34 | **0.624** / 0.600 |
+| pf-bm1, 8 passes greedy | 0.239 | 0.681 | 0.257 | 0.082 | 0.031 | 0.24 | 0.28 | 0.564 / 0.538 |
+| pf-bm2, one pass | 0.314 | 0.827 | 0.342 | 0.121 | **0.048** | **0.39** | 0.35 | 0.601 / 0.592 |
+| pf-bm2, 8 passes greedy | 0.316 | 0.819 | 0.345 | 0.120 | 0.047 | **0.39** | **0.36** | 0.597 / 0.589 |
+
+Wrong decided blocks in training stop the decoding from over-filling (precision steady over
+the passes), and pf-bm2 places thin parts and windows best of all the models, but it adds
+more solid than pf-b1 and stays below it on geometry and looks; with two photos 0.289–0.296
+against pf-b1's 0.340. **pf-b1 is the best model of the round.** The masked objective on
+the real inputs needs the model's own decisions as the decided blocks (on-policy), not only
+corrupted true ones.
+
+### Real photos: no target to place on (2026-10-20)
+
+Everything above placed the reconstruction on the human build (`refine_to_target`): the
+cameras' similarity to the renders' true cameras, then the turn, scale and shift that best
+overlap the target. A real photo has neither. `photofirst/photos_to_schem.py` runs the
+pipeline on photo files alone:
+
+1. each photo upright (EXIF orientation), its compass heading and 35 mm focal from EXIF
+   (`real.exif_info`), the building cut out by the app's own background removal
+   (`trellis_client._prepare_cutout`, run in `r2m_app`)
+2. hints: the compass heading (or `--yaws`), the camera's tilt measured from the photo
+   (`real.tilt`: MoGe-2's point map, its normals, the up the walls and roofs imply; on the 100
+   evaluation renders 1.8 degrees median error, 5.6 at p90; searching the roll too is worse,
+   8.7 at p90), the focal
+3. MapAnything on all photos with the hints; placed without a target (`place.free_placement`):
+   the up perpendicular to every camera's right axis (a hand-held camera is level), the walls'
+   directions turned onto the grid, metric scale (from a second, unhinted MapAnything pass:
+   the hinted one takes the hints' unit-free scale) or `--height`, ground at y = 0
+4. the completion model, `build.schem` (Sponge v2, 1.21.11 states, neighbour states finished,
+   hollowed to the shell: the model's inside is never supervised), previews
+
+**The up direction.** On the 25 evaluation builds' four photos (DA3's reconstructions with
+rough hints, against the true cameras' up): the cameras alone 1.5 degrees off (median, 2.4 at
+worst); levelling on the reconstruction's surfaces (walls perpendicular, roofs along) is worse,
+1.8 median but 7.3 at p90 and 22 at worst (noisy surfaces, slopes); the hints' own frame 11.
+With MapAnything and compass hints: 0.5 degrees median, 3.1 at p90.
+
+**What each part costs** (MapAnything, four photos, pf-b1, half-block inputs, the 12 val
+builds; for scoring, a target-free result is put on the target by a quarter turn and a
+whole-block shift, `training.score.align`):
+
+| hints | placement | scale | IoU | F1 within 1 | precision | recall |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| rough (yaw ±10°, pitch ±5°) | on the target | refined on the target | 0.364 | 0.865 | 0.413 | 0.745 |
+| compass (yaw ±12°, tilt from the photo) | on the target | refined on the target | 0.349 | 0.865 | 0.398 | 0.740 |
+| compass | free, the input moved onto the target before the model | the true cameras' | 0.330 | 0.836 | | |
+| compass | **free, as on real photos** (aligned after, by the input's alignment) | the true cameras' | **0.299** | 0.797 | 0.340 | 0.712 |
+| compass | free, as on real photos (aligned after, by the prediction's) | the true cameras' | 0.283 | 0.790 | 0.307 | 0.780 |
+| compass | free, as on real photos (the prediction's alignment, no room below) | the target's height | 0.235 | 0.715 | 0.262 | 0.751 |
+
+A phone's compass is as good a hint as the rough one (0.349 against 0.364). Placed without
+the target, the front end's blocks are nearly as good (within a block, recall 0.83 against
+0.84 placed on the target), and moved onto the target before the model they give 0.330: the
+placement itself costs 0.02. What costs more is where the build sits in its grid: the model
+reads absolute height, and the photos rarely show a build's base (the human builds have a
+ground plate or foundation a few blocks below what the photos show), so a free grid with the
+lowest visible point at y = 0 leaves no room for it. Room below (`free_placement(below=...)`:
+2 blocks, the median offset) helps (0.274 → 0.283 by the prediction's alignment); a real-photo
+run with a phone's compass scores about 0.30 (0.299 by the input's own alignment). Choosing
+the scale by the build's height costs a further 0.04 against the true scale (spires, ground
+plates and unseen tops make height a poor ruler); on real photos the user chooses the scale.
+
+**Pairs placed as real photos will be** (`mv_pairs --placement free --hints compass_sim`:
+the free placement at the true cameras' scale, then turned and shifted onto the target by a
+quarter turn and whole blocks, `front_mv.onto_target`, so the placement's own tilt and yaw
+errors stay in the input; 1,518 pairs) did not help: pf-b3 (from pf-b1, 4,000 steps) 0.327
+against pf-b1's 0.330 on the free inputs moved onto the target, 0.351 against 0.364 on the
+inputs placed on it. pf-b1 stays the model.
+
+**Real photos.** On a real photo (single views from `pairs/real_photo_replicas`, a human
+replica each) the whole path runs (orientation from EXIF, the cutout, MapAnything, the free
+placement levelled 1.3 degrees, the model, the `.schem`), and shows what the evaluation renders
+do not: a close-up that crops the building (the Carson mansion) defeats the cutout (the
+segmentation keeps 0.5% of the frame and is rejected: the whole photo goes in), and one photo
+leaves the back to the model (the Coleraine church comes out a speckled box open at the back).
+2-4 photos each showing the whole building are the input this pipeline needs.
