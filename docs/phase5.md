@@ -767,3 +767,79 @@ do not: a close-up that crops the building (the Carson mansion) defeats the cuto
 segmentation keeps 0.5% of the frame and is rejected: the whole photo goes in), and one photo
 leaves the back to the model (the Coleraine church comes out a speckled box open at the back).
 2-4 photos each showing the whole building are the input this pipeline needs.
+
+### Round 4: real-schems-v2, street-level photos, retraining, details (2026-10-21/22)
+
+Dataset: [real-schems-v2](real-schems-v2.md) (D26): v1 unchanged plus 691 new builds, train
+908 / val 48 / test 38, normalize-6 (crop steps 9-11: terrain masses, aprons, trees,
+detached parts). Report: `data/real-schems-v2/photofirst/report_round4.md`.
+
+**Street-level photos** (`photofirst.render --street`): eight per build, standing on the
+build's own ground at eye height (1.6 m at its storey height; 15% from a raised spot),
+tilted up to fit it (up to 35 degrees), a phone's lens (50-70 degrees), five across one side
+and three round the back, sun or overcast, smoothed or blocky surfaces; `photo_effects`: half
+the photos lose part of the base to things in front (removed with the background), a tight
+cutout, blur, noise, JPEG. Training sets (`front_mv.street_subsets`): 3 and 2 from the front,
+4 from the front, 4 all round; evaluation (`STREET_EVAL`): street3 (-40, 0, +40), street2
+(-40, +40), around4 (-80, 0, +80, 180). 3,632 pairs (908 builds x 4) through MapAnything with
+simulated phone-compass hints, each placed on the target (`st_cs`) and as real photos are
+(`st_cs_free`: `place.free_placement`, the target moved into its frame,
+`front_mv.target_into`; the loader uses a pair's own target).
+
+**The front end on street photos** (48 val builds, compass hints): within a block, recall
+0.54-0.61 and precision 0.71-0.77 (the old all-round orbit photos: 0.91 / 0.84); cameras
+6-7.5 degrees off; placed as real, the up 2.5-3.1 degrees off (median; p90 6-8) and the
+walls 3.2-3.5 degrees off the grid (p90 9-10).
+
+**Where the ground is** (80 street sets, the true base's height in the free grid, ideal 2):
+the lowest visible point: median 2.0, within a block 56%; the median camera minus eye height:
+median 3.0, 56%; the lowest camera minus eye height: median 4.0, 42%. MapAnything's camera
+heights are too noisy; another photo usually shows a base one hides. The lowest point stays
+(`place.ground_from_cameras` kept as an option). The free grid's margin 4 → 8 (the target
+inside the grid: p25 76% → 91%) and `extend_back` (room for the unseen back when every
+camera is on one side).
+
+**The model reads absolute height**: `training.model.features` gives each voxel its height
+above the grid floor; the targets' floor is 2 below the lowest kept block, so a free grid must
+put the base there too (what the placement does).
+
+**Runs** (from pf-b1 unless noted; validation picks on the street3 inputs):
+pf-c1: street pairs placed on the target, 10k steps; pf-c1f: the as-real pairs, 10k; pf-c2:
+widths 48-96-192-384 (16.2 M parameters), from scratch, both pair sets, 16k steps (still
+improving); pf-c2b: pf-c2 + 8k steps. All on the val set's saved MapAnything inputs
+(`evaluate_saved`, `--free` for the as-real cells):
+
+| IoU / material / exact | street3 on target | street2 on target | around4 on target | street3 as real | street2 as real | old 4 corners |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| pf-b1 | 0.213 / 0.120 / 0.030 | 0.209 / 0.117 / 0.029 | 0.229 / 0.116 / 0.030 | 0.185 / 0.100 / 0.016 | 0.181 / 0.096 / 0.018 | 0.360 / 0.124 / 0.040 |
+| pf-c1 | 0.233 / 0.152 / 0.043 | 0.230 / 0.138 / 0.041 | 0.250 / 0.160 / 0.046 | 0.190 / 0.142 / 0.027 | 0.176 / 0.121 / 0.023 | 0.358 / 0.175 / 0.059 |
+| pf-c1f | 0.208 / 0.162 / 0.031 | 0.204 / 0.140 / 0.027 | 0.218 / 0.172 / 0.034 | 0.195 / 0.149 / 0.029 | 0.190 / 0.143 / 0.026 | 0.359 / 0.159 / 0.044 |
+| pf-c2 | 0.233 / 0.161 / 0.038 | 0.228 / 0.160 / 0.035 | 0.247 / 0.172 / 0.042 | 0.196 / 0.163 / 0.034 | 0.185 / 0.156 / 0.030 | 0.360 / 0.182 / 0.071 |
+| pf-c2b | 0.237 / 0.173 / 0.041 | 0.226 / 0.177 / 0.034 | 0.247 / 0.175 / 0.041 | 0.198 / 0.168 / 0.034 | 0.183 / 0.148 / 0.025 | 0.359 / 0.196 / 0.076 |
+
+Looks (DINOv2, `photofirst.looks`, street3): on target pf-b1 0.574 / pf-c1 0.590 / pf-c1f
+0.553 / pf-c2 0.552 / pf-c2b 0.559; as real 0.581 / 0.579 / 0.549 / 0.562 / 0.562. F1~1
+(street3 on target / as real): pf-b1 0.623 / 0.579, pf-c1 0.673 / 0.599, pf-c1f 0.597 /
+0.578, pf-c2 0.642 / 0.576, pf-c2b 0.647 / 0.583. pf-c1 is the default for real photos
+(looks, F1~1); pf-c2b has the most accurate materials placed as real. Training on the
+as-real pairs gains placed as real but makes the outputs blander (palette90 3.6 against
+pf-c1's 5.7; human 7.3): with the input a block or two off, hedging with common materials
+pays.
+
+**Details**: the models make 15-20% of the visible blocks partial (stairs, slabs, thin
+parts), the human builds 39%; roof steps 0.22-0.27 against 0.44. A decoding calibration
+(`predict_grid(shape_prior=...)`, `--shape-bias`): a voxel's air-or-solid decision is kept
+and its solid shape is the argmax of probability x (class weight / full's) ** tau (the
+first try, which spread the solid probability, also turned voxels to air: IoU 0.233 → 0.211
+at tau 0.25). pf-c1, street3 on target:
+
+| tau | IoU | exact | stairs F1 | slab F1 | thin F1 | partial | roof steps | palette90 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 0.233 | 0.043 | 0.29 | 0.23 | 0.10 | 0.175 | 0.22 | 5.7 |
+| 0.25 | 0.231 | 0.039 | 0.32 | 0.22 | 0.18 | 0.258 | 0.25 | 5.9 |
+| 0.5 | 0.231 | 0.030 | 0.35 | 0.24 | 0.26 | 0.411 | 0.30 | 6.4 |
+| 0.75 | 0.230 | 0.021 | 0.34 | 0.26 | 0.31 | 0.586 | 0.34 | 7.0 |
+
+At 0.5 the partial share matches the human builds; the looks score does not move (0.587
+against 0.590); exact blocks drop. Default for real photos (`photos_to_schem --shape-bias
+0.5`).

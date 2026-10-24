@@ -66,6 +66,65 @@ TIER_BY_LICENCE = {
     "explicit license: CC BY-NC-SA 4.0": "C",
     "explicit license: CC BY-NC-ND 4.0": "X",                     # Costanera
     "explicit terms: use with credit, no redistribution": "X",    # Xorph barn
+    # real-schems-v2 (2026-10-21): the v2 collection's wording (one string per listing, as its
+    # collector recorded them), tiered by D14's rules. A: a stated general reuse permission,
+    # credit requested or not, scope otherwise unspecified (as v1's A). B: no clear permission.
+    # C: non-commercial or personal-use terms, and permissions only for playing it (servers,
+    # maps, videos, single-player): a use-limited permission is not a reuse permission. None is
+    # no-derivatives / no-redistribution / no-ML (the collector excluded those).
+    "CC BY 4.0 (stated in listing)": "A",
+    "CC BY 3.0": "A",
+    "Free use with credit (creator statement); ML scope unspecified": "A",
+    "informal credit-only reuse permission": "A",
+    "Informal credit-only reuse permission": "A",
+    "Informal reuse permission": "A",
+    "informal reuse permission": "A",
+    "Informal broad reuse permission with credit": "A",
+    "Informal broad use permission with creator credit": "A",
+    "Informal credit-and-link project reuse permission": "A",
+    "Informal reuse permission with attribution; comprehensive licence unclear": "A",
+    "Informal broad use invitation; comprehensive licence unclear": "A",
+    "Informal community reuse invitation; comprehensive licence unclear": "A",
+    "Informal credited third-party reuse permission; comprehensive licence unclear": "A",
+    "Informal public-use permission with credit; comprehensive licence unclear": "A",
+    "Informal use invitation with credit request; comprehensive licence unclear": "A",
+    "Informal use permission with credit request; comprehensive licence unclear": "A",
+    "Single-player download allowed; broader use with creator credit": "A",
+    "Stated free-use permission; credit requested; scope not fully specified": "A",
+    "Use and modifications permitted with credit; broader scope unspecified": "A",
+    "Use permitted with creator credit; broader scope unclear": "A",
+    "Use permitted with credit requested; broader scope unspecified": "A",
+    "Use with credit statement; broader scope unspecified": "A",
+    "permissive terms stated by builder (attribution requested)": "A",
+    "permissive terms stated by builder (no formal licence)": "A",
+    "stated reuse permission with credit; full scope unclear": "A",
+    "license unclear (credit requested)": "B",
+    "license unclear (creator requests credit for use beyond singleplayer)": "B",
+    "license unclear (creator requires credit for server/video use)": "B",
+    "Reuse invitation with contact and credit conditions; conditions unresolved": "B",
+    "Specific reuse permission in comments; broader license unclear": "B",
+    "CC BY-NC 4.0": "C",
+    "CC BY-NC 4.0 (stated in listing)": "C",
+    "CC BY-NC-SA 4.0": "C",
+    "CC BY-NC-SA 4.0 (as stated on listing)": "C",
+    "CC BY-NC-SA 4.0 (stated in listing)": "C",
+    "CC BY-NC-SA4.0": "C",
+    "CC BY-NC-SA 3.0 Unported": "C",
+    "Custom reuse and modification permission; no sale or authorship misrepresentation": "C",
+    "Custom reuse permission with attribution and profit-sharing condition": "C",
+    "Personal viewing allowed; reuse licence unclear; no claiming authorship": "C",
+    "personal/private use only; broader licence unclear": "C",
+    "Single-player use/modification permitted; public server/video use with credit": "C",
+    "World/server use permitted; video credit requested; broader scope unspecified": "C",
+    "Informal map/server reuse with credit": "C",
+    "Informal maps/server reuse permission with credit; comprehensive licence unclear": "C",
+    "Informal project/server-use permission; broader license unclear": "C",
+    "Informal server-use permission; comprehensive licence unclear": "C",
+    "Server use permitted; project credit appreciated; broader licence unclear": "C",
+    "informal attributed project/server-use permission": "C",
+    "informal attributed server-use permission": "C",
+    "informal server-use and room-edit permission": "C",
+    "Video/stream use with credit; interior decoration invited; broader licence unclear": "C",
 }
 
 PASS_THROUGH = (
@@ -75,7 +134,8 @@ PASS_THROUGH = (
 )
 FLAGS = ("tier_x", "incomplete_listing", "oversized_capture", "legacy_format",
          "near_dup_candidate", "excluded_landscape_diorama", "excluded_target_lost_terrain",
-         "geometric_duplicate")
+         "excluded_display_stand", "excluded_two_builds", "excluded_incomplete_build",
+         "geometric_duplicate", "duplicate_of_base", "base_split_crossing")
 
 # D24 (2026-10-12): landscape dioramas set aside -- the building is a small part of a
 # modelled landscape, so the crop cannot make a clean training target of it.
@@ -267,7 +327,7 @@ def _write_freeze_md(path: Path, r: dict, entries: list[dict]) -> None:
     type_rows = "\n".join(f"| `{t}` | {n} |" for t, n in sorted(by_type.items(),
                                                               key=lambda kv: (-kv[1], kv[0])))
     n = r["files"]
-    path.write_text(f"""# {DATASET}: freeze record
+    path.write_text(f"""# {path.parent.name}: freeze record
 
 **Never edit `source/`; derived files live beside it.** `source/` is a verbatim copy and is
 set read-only. Regenerate derived files with `python -m schemset.freeze --out <this folder>`
@@ -332,8 +392,14 @@ def licence_tier(status: str) -> str:
 
 
 def _percent(value) -> float | None:
+    """60, "60", or the v2 collection's "60% complete" / "95% overall; ..." -> the number."""
     if value is None or value == "":
         return None
+    if isinstance(value, str):
+        m = re.match(r"\s*(\d+(?:\.\d+)?)", value)
+        if not m:
+            raise FreezeError(f"listing_completion_percent is not a number: {value!r}")
+        value = m.group(1)
     return float(value)
 
 
@@ -606,9 +672,16 @@ def split_counts(rows: list[dict]) -> dict:
     return out
 
 
-def derive(out: Path, seed: int = SEED) -> dict:
-    """index.json, near_duplicates.json, splits.json from out/source (deterministic)."""
+def derive(out: Path, seed: int = SEED, base: Path | None = None) -> dict:
+    """index.json, near_duplicates.json, splits.json from out/source (deterministic).
+
+    With `base` (an earlier frozen dataset, e.g. real-schems-v1), the result is the combined
+    dataset: the base's rows come first, exactly as its index.json has them (splits, groups,
+    flags), with `source_root` pointing at its own frozen copy, so nothing of it is copied or
+    changed; this dataset's builds follow (`derive_combined`)."""
     out = Path(out)
+    if base is not None:
+        return derive_combined(out, Path(base), seed)
     entries = load_manifest(out / "source")
     entries_by_id = {e["id"]: e for e in entries}
     if len(entries_by_id) != len(entries):
@@ -634,13 +707,13 @@ def derive(out: Path, seed: int = SEED) -> dict:
     overrides = apply_overrides(rows, groups, out / GEOMETRIC_DUPLICATES)
 
     counts = split_counts(rows)
-    index = {"dataset": DATASET, "rows_count": len(rows),
+    index = {"dataset": out.name, "rows_count": len(rows),
              "tier_mapping": TIER_BY_LICENCE, "flags": list(FLAGS),
              "fields": [*PASS_THROUGH, "category_top", "creator_norm", "licence_tier", "flags",
                         "split", "creator_group"],
              "rows": rows}
     splits = {
-        "dataset": DATASET, "seed": seed, "fractions": FRACTIONS,
+        "dataset": out.name, "seed": seed, "fractions": FRACTIONS,
         "method": ("Tier X -> excluded. The rest is grouped by creator_norm, joined by creator "
                    "links and near-duplicate candidates (union-find); unknown creators are one "
                    "build each. Groups are placed largest first (ties: seeded shuffle) into the "
@@ -651,6 +724,178 @@ def derive(out: Path, seed: int = SEED) -> dict:
         "creator_notes": creator_notes(rows, entries_by_id),
         "groups": groups,
         "overrides": overrides,
+        "assignments": {r["id"]: r["split"] for r in rows},
+    }
+    _write_json(out / "index.json", index)
+    _write_json(out / "near_duplicates.json", near)
+    _write_json(out / "splits.json", splits)
+    return {"rows": rows, "near": near, "splits": splits}
+
+
+# D26 (2026-10-22): builds of the new collection set aside after the normalize-6 review (crop
+# steps 9-11 already applied), by id -> flag. What is left of them is not a clean target of one
+# building: a diorama (D24's flag), a building on a display stand, two unrelated builds in one
+# capture, an unfinished build. Their files stay frozen; they get split "excluded".
+SET_ASIDE_NEW: dict[str, str] = {
+    "pmc-beautiful-modern-cottage": "excluded_landscape_diorama",        # a house in a forest
+    "pmc-regional-airport-3328707": "excluded_landscape_diorama",        # airfield, parked planes
+    "pmc-tamas-manor": "excluded_landscape_diorama",                     # terrain cube: debris left
+    "pmc-lighthouse-timelapse-schematic-1-17-1": "excluded_landscape_diorama",   # rock arches
+    "pmc-the-bates-motel-from-psycho": "excluded_landscape_diorama",     # two buildings on a hill
+    "pmc-modern-house-4-3331081": "excluded_landscape_diorama",          # a whole walled garden plot
+    "pmc-alpine-chalet": "excluded_landscape_diorama",                   # snow plate and spruces
+    "pmc-single-story-barn-conversion-modern-house": "excluded_landscape_diorama",   # in a wood
+    "pmc-simple-house-2990730": "excluded_landscape_diorama",            # a garden of follies
+    "pmc-hotel-de-angeli": "excluded_display_stand",                     # on a geology cross-section
+    "pmc-modern-house-2196729": "excluded_display_stand",                # on a stone pedestal
+    "pmc-clayleaf-nearly-fully-furnished-brick-house": "excluded_two_builds",
+    "pmc-graumans-chinese-theatre---hollywood-landmark": "excluded_incomplete_build",  # hall a box
+}
+
+
+def derive_combined(out: Path, base: Path, seed: int = SEED) -> dict:
+    """The combined dataset: `base`'s rows unchanged (its splits are fixed, so every result on
+    its val / test builds stays comparable), then the new collection's (`out/source`).
+
+    A new build joins the split of any base creator group it is linked to (same creator,
+    creator links, near-duplicate candidates): a creator never straddles train and test.
+    Otherwise it goes to train. A new build whose links join base groups of two splits is
+    excluded (`base_split_crossing`): either split would leak the other. Tier X is excluded.
+    After `schemset.dedupe`, a new build that duplicates a base build of another split is
+    excluded (`duplicate_of_base`) rather than moving either: the base never moves.
+
+    The v2 collection records its non-air counts under `geometry_metrics` (counted from the
+    parsed NBT) and leaves `non_air_blocks_from_metadata` empty; that count fills it
+    (`non_air_basis`), so the near-duplicate test and normalize's validation can use it.
+    """
+    entries = load_manifest(out / "source")
+    base_index = json.loads((base / "index.json").read_text(encoding="utf-8"))
+    base_entries = load_manifest(base / "source")
+    entries_by_id = {e["id"]: e for e in base_entries}
+    clash = sorted(e["id"] for e in entries if e["id"] in entries_by_id)
+    if clash:
+        raise FreezeError(f"ids in both collections: {clash[:5]}")
+    entries_by_id.update({e["id"]: e for e in entries})
+    root = Path(os.path.relpath(base / "source", out)).as_posix()
+    base_rows = []
+    for r in base_index["rows"]:
+        r = dict(r)
+        r["source_root"], r["origin"] = root, base.name
+        base_rows.append(r)
+    new_rows = build_rows(entries)
+    for r in new_rows:
+        r["source_root"], r["origin"] = "source", out.name
+        counted = (entries_by_id[r["id"]].get("geometry_metrics") or {}).get("non_air_blocks_counted")
+        if r["non_air_blocks_from_metadata"] is None and counted is not None:
+            r["non_air_blocks_from_metadata"], r["non_air_basis"] = int(counted), "geometry_metrics"
+    rows = base_rows + new_rows
+    by_id = {r["id"]: r for r in rows}
+
+    # A base build without a metadata count is tested with the count its own normalize read
+    # (the row itself stays as the base has it): a church and a house that only share their
+    # dims (the v1 Coleraine church, 5,915 blocks, against a 3,878-block house) are no pair.
+    measured = {}
+    for r in base_rows:
+        rec = base / "normalized" / "records" / f"{r['id']}.json"
+        if r["non_air_blocks_from_metadata"] is None and rec.is_file():
+            n = json.loads(rec.read_text(encoding="utf-8")).get("validation", {}).get("non_air_read")
+            if n is not None:
+                measured[r["id"]] = int(n)
+    near = find_near_duplicates([{**r, "non_air_blocks_from_metadata": measured[r["id"]]}
+                                 if r["id"] in measured else r for r in rows])
+    near["method"]["measured_base_counts"] = (f"{len(measured)} {base.name} builds without a "
+                                              "metadata count use the count its normalize read")
+    for c in near["candidates"]:
+        for i in c["ids"]:
+            if by_id[i]["origin"] == out.name and "near_dup_candidate" not in by_id[i]["flags"]:
+                by_id[i]["flags"].append("near_dup_candidate")
+    links = creator_links(rows, entries_by_id)
+    pair_links = [tuple(l["creators"]) for l in links]
+    pair_links += [(creator_node(by_id[a]), creator_node(by_id[b]))
+                   for c in near["candidates"] for a, b in [c["ids"]]]
+
+    uf = _UnionFind()
+    for r in rows:
+        if r["licence_tier"] != "X":
+            uf.add(creator_node(r))
+    nodes = set(uf.parent)
+    for a, b in pair_links:
+        if a in nodes and b in nodes:
+            uf.union(a, b)
+    members = collections.defaultdict(list)
+    for r in rows:
+        if r["licence_tier"] != "X":
+            members[uf.find(creator_node(r))].append(r)
+    groups, crossings = [], []
+    for key in sorted(members):
+        g = members[key]
+        base_splits = collections.Counter(r["split"] for r in g if r["origin"] == base.name
+                                          and r["split"] != "excluded")
+        if len(base_splits) > 1:                  # a new build links base groups of two splits:
+            crossings.append({"group": key, "base_splits": dict(base_splits),   # its builds
+                              "new_excluded": sorted(r["id"] for r in g        # are excluded
+                                                     if r["origin"] == out.name)})
+        split = base_splits.most_common(1)[0][0] if base_splits else "train"
+        crossing = len(base_splits) > 1
+        for r in g:
+            if r["origin"] == out.name:
+                r["split"], r["creator_group"] = ("excluded" if crossing else split), key
+                if crossing:
+                    r["flags"].append("base_split_crossing")
+        groups.append({"key": key, "split": split, "builds": len(g),
+                       "creators": sorted({creator_node(r) for r in g}),
+                       "ids": sorted(r["id"] for r in g),
+                       "new": sum(r["origin"] == out.name for r in g)})
+    for r in new_rows:
+        if r["licence_tier"] == "X":
+            r["split"], r["creator_group"] = "excluded", None
+
+    set_aside, dup_excluded = [], []
+    for bid, flag in sorted(SET_ASIDE_NEW.items()):
+        if bid in by_id and by_id[bid]["origin"] == out.name:
+            set_aside.append({"id": bid, "from": by_id[bid]["split"], "flag": flag})
+            by_id[bid]["split"] = "excluded"
+            if flag not in by_id[bid]["flags"]:
+                by_id[bid]["flags"].append(flag)
+    dup_path = out / GEOMETRIC_DUPLICATES
+    if dup_path.is_file():
+        for p in json.loads(dup_path.read_text(encoding="utf-8"))["pairs"]:
+            if p.get("verdict") != "duplicate" or not all(i in by_id for i in p["ids"]):
+                continue
+            a, b = (by_id[i] for i in p["ids"])
+            for r in (a, b):
+                if r["origin"] == out.name and "geometric_duplicate" not in r["flags"]:
+                    r["flags"].append("geometric_duplicate")
+            olds = [r for r in (a, b) if r["origin"] == base.name]
+            news = [r for r in (a, b) if r["origin"] == out.name]
+            if olds and news and news[0]["split"] != "excluded" and olds[0]["split"] != news[0]["split"]:
+                news[0]["flags"].append("duplicate_of_base")
+                dup_excluded.append({"id": news[0]["id"], "duplicate_of": olds[0]["id"],
+                                     "base_split": olds[0]["split"], "was": news[0]["split"]})
+                news[0]["split"] = "excluded"
+            elif len(news) == 2 and a["split"] != b["split"] and "excluded" not in (a["split"], b["split"]):
+                small = min(news, key=lambda r: (len(members[uf.find(creator_node(r))]), r["id"]))
+                other = a if small is b else b
+                dup_excluded.append({"id": small["id"], "duplicate_of": other["id"], "moved_to": other["split"]})
+                small["split"] = other["split"]
+
+    counts = split_counts(rows)
+    new_counts = split_counts(new_rows)
+    index = {"dataset": out.name, "base": base.name, "rows_count": len(rows),
+             "tier_mapping": TIER_BY_LICENCE, "flags": list(FLAGS),
+             "fields": [*PASS_THROUGH, "category_top", "creator_norm", "licence_tier", "flags",
+                        "split", "creator_group", "source_root", "origin"],
+             "rows": rows}
+    splits = {
+        "dataset": out.name, "base": base.name, "seed": seed, "fractions": FRACTIONS,
+        "method": (f"{base.name}'s rows and splits unchanged. A new build joins the split of "
+                   "any base creator group it is linked to (creator_norm, creator links, "
+                   "near-duplicate candidates; union-find); otherwise train. Tier X excluded. "
+                   "A new build duplicating a base build of another split is excluded."),
+        "counts": counts, "new_counts": new_counts,
+        "creator_links": links, "creator_notes": creator_notes(rows, entries_by_id),
+        "groups": groups, "base_split_crossings": crossings,
+        "overrides": {"set_aside_new": set_aside, "duplicates": dup_excluded},
         "assignments": {r["id"]: r["split"] for r in rows},
     }
     _write_json(out / "index.json", index)
@@ -730,6 +975,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--force", action="store_true", help="re-copy over an existing source/")
     ap.add_argument("--seed", type=int, default=SEED)
+    ap.add_argument("--base", type=Path, default=None,
+                    help="an earlier frozen dataset whose rows and splits the combined index keeps unchanged")
     args = ap.parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -751,7 +998,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"verified: {r['checksum_lines']} checksum lines, {r['manifest_entries']} manifest "
               f"sha256, {r['files']} files byte-identical; source/ read-only")
 
-    d = derive(args.out, seed=args.seed)
+    d = derive(args.out, seed=args.seed, base=args.base)
     rows = d["rows"]
     print(f"index: {len(rows)} rows")
     print("tiers:", dict(sorted(collections.Counter(r["licence_tier"] for r in rows).items())))

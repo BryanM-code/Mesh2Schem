@@ -216,5 +216,82 @@ class ReadOnlyTests(FreezeCase):
         self.assertTrue(F.is_readonly(self.out / "source" / "README.md"))
 
 
+class CombinedTests(FreezeCase):
+    """`derive(out, base=...)`: a new collection added to a frozen dataset whose splits stay."""
+
+    def setUp(self):
+        super().setUp()
+        make_dataset(self.src, standard_entries())
+        self.base = self.tmp / "base-v1"
+        F.freeze(self.src, self.base)
+        self.base_rows = {r["id"]: r for r in F.derive(self.base)["rows"]}
+        self.split_of = {}
+        for r in self.base_rows.values():
+            self.split_of.setdefault(r["creator"], r["split"])
+
+    def _creator_in(self, split: str) -> str:
+        return next(c for c, s in sorted(self.split_of.items())
+                    if s == split and not c.startswith("Gamma"))
+
+    def _new(self, entries: list[dict]) -> Path:
+        src, out = self.tmp / "new", self.tmp / "combined"
+        make_dataset(src, entries)
+        F.freeze(src, out)
+        return out
+
+    def test_base_unchanged_new_builds_follow_their_creator(self):
+        val_creator = self._creator_in("val")
+        entries = [_entry(200 + i, f"New{_tag(300 + i)}") for i in range(6)]
+        entries.append(_entry(220, val_creator))                       # a base val creator
+        entries.append(_entry(221, "Other", licence="explicit license: CC BY-NC-ND 4.0"))
+        entries.append(_entry(222, "Lic", licence="CC BY 4.0 (stated in listing)"))
+        out = self._new(entries)
+        d = F.derive(out, base=self.base)
+        rows = {r["id"]: r for r in d["rows"]}
+        for i, r in self.base_rows.items():                          # base rows: as they were
+            self.assertEqual(rows[i]["split"], r["split"], i)
+            self.assertEqual(rows[i]["origin"], "base-v1")
+            self.assertEqual(rows[i]["source_root"], "../base-v1/source")
+        self.assertTrue((out / rows["b0"]["source_root"] / rows["b0"]["file"]).is_file())
+        for i in range(6):
+            self.assertEqual(rows[f"b{200 + i}"]["split"], "train")
+            self.assertEqual(rows[f"b{200 + i}"]["source_root"], "source")
+        self.assertEqual(rows["b220"]["split"], "val")
+        self.assertEqual(rows["b221"]["split"], "excluded")
+        self.assertEqual(rows["b222"]["licence_tier"], "A")
+        index = json.loads((out / "index.json").read_text("utf-8"))
+        self.assertEqual((index["dataset"], index["base"]), ("combined", "base-v1"))
+
+    def test_id_clash_stops(self):
+        out = self._new([_entry(3, "Somebody")])                     # b3 is a base id
+        with self.assertRaisesRegex(F.FreezeError, "both collections"):
+            F.derive(out, base=self.base)
+
+    def test_bridge_between_base_splits_is_excluded(self):
+        a, b = self._creator_in("train"), self._creator_in("test")
+        twin = next(r for r in self.base_rows.values() if r["creator"] == b)
+        e = _entry(230, f"{a}; with credits")                        # linked to a (credit suffix)
+        e["dimensions_xyz_blocks"] = list(twin["dimensions_xyz_blocks"])   # ...and a near-dup of
+        e["non_air_blocks_from_metadata"] = twin["non_air_blocks_from_metadata"]   # b's build
+        d = F.derive(self._new([e, _entry(231, "Loner")]), base=self.base)
+        rows = {r["id"]: r for r in d["rows"]}
+        self.assertEqual(rows["b230"]["split"], "excluded")
+        self.assertIn("base_split_crossing", rows["b230"]["flags"])
+        self.assertEqual(rows["b231"]["split"], "train")
+        self.assertEqual(rows[twin["id"]]["split"], "test")
+
+    def test_duplicate_of_a_base_eval_build_is_excluded(self):
+        test_row = next(r for r in self.base_rows.values() if r["split"] == "test")
+        out = self._new([_entry(240, "Copier"), _entry(241, "Fine")])
+        (out / F.GEOMETRIC_DUPLICATES).write_text(json.dumps({"pairs": [
+            {"ids": [test_row["id"], "b240"], "verdict": "duplicate"}]}), encoding="utf-8")
+        d = F.derive(out, base=self.base)
+        rows = {r["id"]: r for r in d["rows"]}
+        self.assertEqual(rows["b240"]["split"], "excluded")
+        self.assertIn("duplicate_of_base", rows["b240"]["flags"])
+        self.assertEqual(rows[test_row["id"]]["split"], "test")
+        self.assertEqual(rows["b241"]["split"], "train")
+
+
 if __name__ == "__main__":
     unittest.main()

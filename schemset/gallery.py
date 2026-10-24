@@ -86,7 +86,7 @@ def render_card(dataset: str, rec: dict, out_dir: str) -> dict:
     bid = rec["id"]
     out = {"id": bid, "images": {}}
     try:
-        build = load_build(dataset / "source" / rec["file"])
+        build = load_build(dataset / rec.get("source_root", "source") / rec["file"])
         crop = crop_build(build)
         with np.load(dataset / "normalized" / rec["npz"]) as z:
             blocks, palette = z["blocks"], [str(s) for s in z["palette"]]
@@ -132,7 +132,7 @@ def card_data(rec: dict, row: dict, prev: dict | None, images: dict) -> dict:
     change = _change(rec, prev)
     return {
         "id": rec["id"], "name": row.get("build_name") or "", "creator": row.get("creator") or "",
-        "url": row.get("source_url") or "", "split": rec["split"],
+        "url": row.get("source_url") or "", "split": rec["split"], "origin": row.get("origin") or "",
         "cat": rec["building_category"], "top": rec["building_category"].split("/")[0],
         "flags": rec["flags"], "fixed": fixed, "earlier": earlier,
         "cap_changed": change["shell"] is not None and abs(change["shell"]) > CHANGED_SHELL,
@@ -147,7 +147,7 @@ def card_data(rec: dict, row: dict, prev: dict | None, images: dict) -> dict:
 
 PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>real-schems-v1 review</title>
+<title>__TITLE__ review</title>
 <style>
 :root{--bg:#f4f3ef;--card:#fff;--ink:#222;--muted:#666;--line:#ddd;--tag:#eee;--bad:#fde2e2;--fix:#dff3e4}
 body{font-family:system-ui,Segoe UI,sans-serif;margin:0;background:var(--bg);color:var(--ink)}
@@ -173,9 +173,10 @@ select,input{font:inherit;padding:4px 6px}
 #modal img{max-width:92vw;max-height:84vh;background:#f6f6f3}
 #modal div{color:#fff;margin-top:8px;font-size:14px}
 </style></head><body>
-<header><h1>real-schems-v1 after the Phase 3 fixes (<span id="n"></span>)</h1>
+<header><h1>__TITLE__ after the crop (<span id="n"></span>)</h1>
 <input id="q" placeholder="search id / name / creator" size="22">
 <select id="split"><option value="">all splits</option><option>train</option><option>val</option><option>test</option></select>
+<select id="origin"><option value="">all origins</option></select>
 <select id="cat"><option value="">all categories</option></select>
 <select id="flag"><option value="">any flags</option><option value="__fixed">fixed cases (depth cap: halls + porches)</option>
 <option value="__cap">cap changed (shell &gt; 5% vs previous run)</option><option value="__earlier">earlier cases (crop, ground)</option></select>
@@ -198,6 +199,8 @@ const BAD = new Set(["ground_fallback","large_opening","multi_building","crop_ag
   "site_linear_removed","crop_kept_landscape"]);
 const cats = [...new Set(R.map(r => r.top))].sort();
 cats.forEach(c => { const o = document.createElement("option"); o.textContent = c; $("cat").appendChild(o); });
+[...new Set(R.map(r => r.origin).filter(Boolean))].sort().forEach(c => {
+  const o = document.createElement("option"); o.textContent = c; $("origin").appendChild(o); });
 [...new Set(R.flatMap(r => r.flags))].sort().forEach(f => {
   const o = document.createElement("option"); o.textContent = f; $("flag").appendChild(o); });
 function img(r, key, ov) {
@@ -222,8 +225,9 @@ function card(r, ov) {
 }
 function draw() {
   const q = $("q").value.toLowerCase(), sp = $("split").value, ca = $("cat").value, fl = $("flag").value;
+  const og = $("origin").value;
   const ov = $("ov").checked, so = $("sort").value;
-  let rows = R.filter(r => (!sp || r.split === sp) && (!ca || r.top === ca)
+  let rows = R.filter(r => (!sp || r.split === sp) && (!ca || r.top === ca) && (!og || r.origin === og)
     && (!fl || (fl === "__fixed" ? r.fixed.length : fl === "__cap" ? r.cap_changed
                : fl === "__earlier" ? r.earlier.length : r.flags.includes(fl)))
     && (!q || (r.id + " " + r.name + " " + r.creator).toLowerCase().includes(q)));
@@ -234,7 +238,7 @@ function draw() {
   $("n").textContent = rows.length + " of " + R.length;
   $("grid").innerHTML = rows.map(r => card(r, ov)).join("");
 }
-["q","split","cat","flag","sort","ov"].forEach(id => $(id).addEventListener("input", draw));
+["q","split","origin","cat","flag","sort","ov"].forEach(id => $(id).addEventListener("input", draw));
 $("grid").addEventListener("click", e => { if (e.target.tagName === "IMG") {
   $("mimg").src = e.target.src; $("mtxt").textContent = e.target.dataset.cap; $("modal").style.display = "flex"; } });
 draw();
@@ -242,10 +246,11 @@ draw();
 """
 
 
-def write_page(out_dir: Path, cards: list[dict]) -> Path:
+def write_page(out_dir: Path, cards: list[dict], title: str = "real-schems-v1") -> Path:
     data = json.dumps(cards, ensure_ascii=False).replace("</", "<\\/")
     path = out_dir / "index.html"
-    path.write_text(PAGE.replace("__DATA__", data), encoding="utf-8", newline="\n")
+    path.write_text(PAGE.replace("__TITLE__", html.escape(title)).replace("__DATA__", data),
+                    encoding="utf-8", newline="\n")
     return path
 
 
@@ -277,7 +282,7 @@ def build_gallery(dataset: Path, only=None, workers: int = 1, force: bool = Fals
     cache_path.write_text(json.dumps(images, indent=1) + "\n", encoding="utf-8", newline="\n")
     cards = [card_data(r, rows.get(r["id"], {}), prev.get(r["id"]), images.get(r["id"], {}))
              for r in records]
-    return write_page(out_dir, cards)
+    return write_page(out_dir, cards, dataset.name)
 
 
 def main(argv=None) -> int:

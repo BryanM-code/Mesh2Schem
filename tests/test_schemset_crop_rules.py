@@ -24,8 +24,10 @@ PAL = ["minecraft:air", "minecraft:grass_block[snowy=false]", "minecraft:dirt",
        "minecraft:oak_planks", "minecraft:stone", "minecraft:cobblestone",
        "minecraft:stone_bricks", "minecraft:smooth_stone_slab[type=top]",
        "minecraft:oak_log[axis=y]", "minecraft:oak_leaves[distance=1,persistent=true]",
-       "minecraft:polished_andesite", "minecraft:glass"]
-AIR, GRASS, DIRT, PLANKS, STONE, COBBLE, BRICKS, SLAB, LOG, LEAVES, ANDESITE, GLASS = range(12)
+       "minecraft:polished_andesite", "minecraft:glass", "minecraft:coal_ore",
+       "minecraft:end_stone", "minecraft:sandstone", "minecraft:gold_ore"]
+(AIR, GRASS, DIRT, PLANKS, STONE, COBBLE, BRICKS, SLAB, LOG, LEAVES, ANDESITE, GLASS, COAL,
+ END_STONE, SANDSTONE, GOLD) = range(16)
 
 
 def build_of(grid):
@@ -342,6 +344,112 @@ class GroundAndCrop(unittest.TestCase):
         n = floor_under_rooms(build_of(g), crop, m.interior)
         self.assertEqual(n, 9 * 9)
         self.assertIn(PAL[GRASS], crop.palette)
+
+
+def count(crop, block):
+    return int((crop.blocks == crop.palette.index(PAL[block])).sum()) if PAL[block] in crop.palette else 0
+
+
+class SiteCleanup(unittest.TestCase):
+    """normalize-6, crop steps 9-11: terrain masses, flat aprons, trees, detached parts."""
+
+    def crop(self, grid):
+        from schemset.crop import crop_build
+        return crop_build(build_of(grid))
+
+    def test_building_on_a_block_of_rock(self):
+        g = np.zeros((36, 30, 36), np.uint16)
+        g[:, :12, :] = STONE
+        g[3:33:5, 2:10:3, 3:33:5] = COAL                 # sparse ores
+        g[4:9, 3:6, 4:30] = AIR                          # a cave breaks the columns' ground runs
+        g[6, 3, 5:28:4] = COBBLE                         # with bits of a mine in it
+        g[:, 12, :] = GRASS
+        box(g, 10, 22, 13, 19, 10, 22)
+        crop = self.crop(g)
+        self.assertEqual(count(crop, STONE), 0)
+        self.assertEqual(count(crop, COAL), 0)
+        self.assertEqual(count(crop, COBBLE), 0)
+        self.assertEqual(count(crop, PLANKS), int((g == PLANKS).sum()))
+
+    def test_stone_building_with_a_solid_core(self):
+        g = np.zeros((30, 24, 30), np.uint16)
+        g[:, 0, :] = ANDESITE                            # a paved plate, no terrain
+        g[8:20, 1:15, 8:20] = END_STONE                  # solid end stone...
+        for y in range(3, 14, 3):                        # ...with windows on every face
+            g[9:19:3, y, 8] = g[9:19:3, y, 19] = GLASS
+            g[8, y, 9:19:3] = g[19, y, 9:19:3] = GLASS
+        g[8:20, 15, 8:20] = BRICKS
+        crop = self.crop(g)
+        self.assertEqual(count(crop, END_STONE), int((g == END_STONE).sum()))
+
+    def test_a_mass_of_ore_is_a_builders_material(self):
+        g = np.zeros((30, 24, 30), np.uint16)
+        g[:, 0, :] = ANDESITE
+        g[8:20, 1:7, 8:20] = GOLD                        # a texture pack's stone, solid
+        box(g, 8, 19, 7, 13, 8, 19)
+        crop = self.crop(g)
+        self.assertEqual(count(crop, GOLD), int((g == GOLD).sum()))
+
+    def test_sandstone_pyramid_is_kept(self):
+        # On a paved plate: standing on grass, step 1 already reads a solid natural mass as a
+        # hill (D23). Step 9 leaves it: sandstone is a builder's material, not terrain fill.
+        g = np.zeros((40, 16, 40), np.uint16)
+        g[:, 0, :] = ANDESITE
+        for k in range(8):
+            g[5 + k:34 - k, 1 + k, 5 + k:34 - k] = SANDSTONE
+        crop = self.crop(g)
+        self.assertEqual(count(crop, SANDSTONE), int((g == SANDSTONE).sum()))
+
+    def test_parking_lot_is_trimmed(self):
+        from schemset.crop import APRON_KEEP, MARGIN, PAD
+        g = np.zeros((60, 16, 40), np.uint16)
+        g[:, 0, :] = ANDESITE                            # a lot all round, no terrain
+        box(g, 5, 15, 1, 8, 10, 25)
+        crop = self.crop(g)
+        self.assertIn("apron_removed", crop.flags)
+        reach = MARGIN + APRON_KEEP
+        self.assertEqual(crop.blocks.shape[0], (15 - 5 + 1) + 2 * reach + 2 * PAD - (5 - reach < 0))
+        self.assertEqual(count(crop, PLANKS), int((g == PLANKS).sum()))
+
+    def test_detached_parts_go(self):
+        # Step 11 on what earlier steps left: a lamp post and a rock fragment separated from
+        # the house by two blocks or more go; a part one block away is bridged and stays.
+        from schemset.crop import BUILT, NATURAL, clean_site
+        role = np.full((50, 20, 40), BUILT, np.uint8)
+        kept = np.zeros(role.shape, bool)
+        kept[5:19, 1:10, 10:26] = True                   # the house
+        kept[24, 1:7, 17] = True                         # a lamp post, 5 away
+        kept[30:33, 1:4, 30:33] = True                   # a fragment, 27 blocks
+        role[30:33, 1:4, 30:33] = NATURAL
+        kept[20, 1:4, 12] = True                         # a bollard one block from the wall
+        height = np.full((50, 40), -1)
+        out, _, detached, stats = clean_site(kept, role, height, np.zeros_like(kept))
+        self.assertFalse(out[24].any())
+        self.assertFalse(out[30:33].any())
+        self.assertTrue(out[20, 1:4, 12].all())
+        self.assertEqual(stats["detached_parts"], 2)
+        self.assertEqual(int(out.sum()), 14 * 9 * 16 + 3)
+
+    def test_second_building_of_a_compound_stays(self):
+        g = plate(x=60, z=40)
+        box(g, 5, 18, 2, 9, 10, 25)
+        box(g, 30, 43, 2, 9, 10, 25)
+        crop = self.crop(g)
+        self.assertEqual(count(crop, PLANKS), int((g == PLANKS).sum()))
+        self.assertIn("multi_building", crop.flags)
+
+    def test_tree_against_the_wall_goes_ivy_and_green_roof_stay(self):
+        g = plate(x=40, z=36)                            # surface y = 1
+        box(g, 10, 20, 2, 9, 10, 20)
+        g[21:30, 2, 8:23] = ANDESITE                     # a plaza; the tree stands on it
+        g[23, 3:6, 15] = LOG
+        g[21:26, 6:9, 13:18] = LEAVES                    # its crown just touches the wall
+        g[9, 3:8, 12:18] = LEAVES                        # ivy on the other wall
+        g[11:20, 10, 11:20] = LEAVES                     # a green roof
+        crop = self.crop(g)
+        self.assertEqual(count(crop, LOG), 0)
+        self.assertEqual(count(crop, LEAVES), 5 * 6 + 9 * 9)
+        self.assertGreater(crop.stats["removed_trees"], 0)
 
 
 class SetAsideAndDuplicates(unittest.TestCase):

@@ -56,7 +56,9 @@ from pathlib import Path
 
 import numpy as np
 
-VERSION = "normalize-5"             # 5: depth under cover measured from open air, so
+VERSION = "normalize-6"             # 6: site cleanup (crop steps 9-11): terrain masses,
+                                    #    flat aprons, trees against the building, detached parts
+                                    # 5: depth under cover measured from open air, so
                                     #    facades under deep, tall eaves are shell again
                                     # 4: D22 amended -- covered exterior air capped at
                                     #    COVER_DEPTH (3: Phase 3 fixes, D22 / D23)
@@ -102,9 +104,11 @@ def process(row: dict, dataset: str) -> dict:
            "file": row["file"], "file_type": row["file_type"],
            "building_category": row["building_category"],
            "fingerprint": fingerprint(row), "version": VERSION}
+    if row.get("source_root"):                  # a combined dataset: the base's own frozen copy
+        rec["source_root"], rec["origin"] = row["source_root"], row.get("origin")
     try:
         try:
-            build = load_build(dataset / "source" / row["file"])
+            build = load_build(dataset / row.get("source_root", "source") / row["file"])
         except ReadError as exc:
             return {**rec, "status": "failed", "reason": f"read: {exc}"}
         rec["read"] = {"source_format": build.source_format, "data_version": build.data_version,

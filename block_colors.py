@@ -104,6 +104,7 @@ BASE_COLORS = {
     "netherite_block": (66, 61, 63), "copper_block": (192, 107, 79),
     "oxidized_copper": (82, 162, 132), "weathered_copper": (108, 153, 117),
     "exposed_copper": (161, 125, 102),
+    "pale_oak_planks": (227, 217, 214), "bone_block": (229, 225, 207), "mushroom_stem": (203, 196, 185),
     # Building blocks
     "bricks": (150, 97, 83), "nether_bricks": (44, 22, 26),
     "red_nether_bricks": (69, 7, 9), "prismarine": (99, 156, 151),
@@ -202,7 +203,8 @@ STONE_FAMILY_HINTS = (
     ("nether_brick", "nether_bricks"), ("stone_brick", "stone_bricks"),
     ("cobblestone", "cobblestone"), ("andesite", "andesite"), ("diorite", "diorite"),
     ("granite", "granite"), ("basalt", "basalt"), ("tuff", "tuff"),
-    ("calcite", "calcite"), ("copper", "copper_block"), ("amethyst", "amethyst_block"),
+    ("calcite", "calcite"), ("oxidized_", "oxidized_copper"), ("weathered_", "weathered_copper"),
+    ("exposed_", "exposed_copper"), ("copper", "copper_block"), ("amethyst", "amethyst_block"),
     ("mud_brick", "mud_bricks"), ("end_stone", "end_stone"), ("brick", "bricks"),
     ("stone", "stone"),
 )

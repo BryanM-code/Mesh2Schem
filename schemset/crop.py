@@ -62,12 +62,43 @@ Steps (every voxel count is recorded):
    hall on the grass -- the top terrain block under that room is put back as its floor.
    It is interior (ignored) like any floor; the grid just has no hole at the bottom.
 
+Site cleanup (normalize-6, 2026-10-21; for the v2 collection's showcase plots: a building
+on a block of terrain, an island, a hillside, a parking lot), on what steps 1-5 kept, before
+the below-ground test of step 6:
+
+9. **Terrain masses** (`natural_massifs`): natural material (minerals, turf, fluids, cover)
+   in masses a ball of radius `MASSIF_RADIUS` fits in everywhere (an opening: 5+ blocks
+   thick), of at least `MASSIF_MIN` blocks, at least `MASSIF_FILL` of them terrain fill
+   (`is_terrain_fill`: stone, dirt, gravel, ores, snow, ... -- not the sandstone, basalt or
+   blackstone builders make solid masses of), lose every block that lies below the lowest
+   built (non-natural) block within `ENVELOPE_REACH` columns, or that has no built block that
+   near at all: the rock a building stands on, an island, a hill or a crag beside it. Natural
+   stone inside the building's envelope (an end-stone facade, a solid core behind windows)
+   stays, as do walls (too thin for the ball).
+10. **Flat aprons** (`clean_site`): footprint (step 4) again on what is left; a column whose
+   material rises at most `FLAT_RISE` above the ground (or only has soft blocks) is flat, and
+   a flat column more than `APRON_KEEP` from the footprint's near zone and from every raised
+   column loses everything kept in it: streets, parking lots, plazas, patios, a display
+   plate. Steps, stoops and anything standing on a plate (raised) keep a ring of it. Then
+   trees standing against the building go: a cluster of leaves and logs (26-connected) with
+   at least `TREE_LEAVES` leaves, its lowest block at most `TREE_ROOT_RISE` above the
+   ground, under `TREE_CONTACT` of whose leaves touch the building's other blocks. A green
+   roof, ivy, a hedge along a wall or a vertical garden lies on the building and stays.
+11. **Detached parts** (`clean_site`): separate masses (26-connected after bridging
+   one-block gaps); the main one (the largest that is not a tree) stays, and so does every
+   other at least `LARGE_SHARE` of it and `LARGE_MIN` blocks (a compound's buildings) unless
+   it is a tree (`TREE_MASS_SHARE` leaves and logs, under 10% other building blocks); the
+   rest go: lamp posts, cars, benches, statues, fragments of rock left by step 9, trees
+   standing on a removed plaza.
+
 Flags: `multi_building` when more than one large separate mass remains (26-connected after
 bridging one-block gaps; large = at least `LARGE_SHARE` of the biggest and `LARGE_MIN`
 blocks); `crop_aggressive` when more than half of the non-air blocks were removed;
 `crop_kept_landscape` when soft blocks are over `KEPT_LANDSCAPE` of what is kept;
 `crop_no_core` when step 4 found no core; `site_linear_removed` when a wall or fence line
-was cut back to `REACH`; `ground_fallback` (step 6).
+was cut back to `REACH`; `ground_fallback` (step 6); `terrain_massif_removed`,
+`apron_removed`, `trees_removed`, `detached_removed` when steps 9, 10 (aprons, trees) and 11
+removed more than `CLEANUP_FLAG` of what is kept.
 """
 from __future__ import annotations
 
@@ -135,6 +166,28 @@ NATURAL_BASES = SOFT_NATURAL | {
 }
 WOODY_NAMES = {"crimson_stem", "warped_stem", "stripped_crimson_stem", "stripped_warped_stem",
                "bamboo_block", "stripped_bamboo_block"}
+# Step 9's terrain fill: the natural bases terrain is made of. Sandstone, red sandstone,
+# basalt, blackstone, amethyst and sculk are left out: builders build solid masses of them.
+TERRAIN_FILL_BASES = SOFT_NATURAL | {
+    "stone", "andesite", "diorite", "granite", "deepslate", "tuff", "calcite", "bedrock",
+    "magma_block", "dripstone_block", "pointed_dripstone",
+}
+
+MASSIF_RADIUS = 2.0      # step 9: a natural mass a ball of this radius fits in (5+ thick)
+MASSIF_MIN = 125         # ...of at least this many blocks,
+MASSIF_FILL = 0.6        # ...at least this share terrain fill,
+ENVELOPE_REACH = 2       # ...below the lowest built block within this many columns (or none),
+ENVELOPE_MIN = 64        # ...counting built structures (26-connected) of at least this many
+ENVELOPE_SHARE = 0.15    # blocks and this share of the largest (LARGE_SHARE: a building of its
+                         # own), not the bits of a mine in the rock or the frame of a display stand;
+MASSIF_OUTSIDE = 0.5     # a mass goes only if at least this share of it is outside the envelope
+FLAT_RISE = 2            # step 10: material at most this many blocks above the ground is flat
+APRON_KEEP = 1           # ...and stays only this close to the footprint or anything raised
+TREE_LEAVES = 30         # step 10: a leafy cluster (leaves + logs) with this many leaves,
+TREE_ROOT_RISE = 3       # ...its lowest block at most this far above the ground,
+TREE_CONTACT = 0.25      # ...under this share of its leaves touching the building: a tree
+TREE_MASS_SHARE = 0.6    # step 11: a separate mass this leafy (leaves + logs) is a tree
+CLEANUP_FLAG = 0.02      # steps 9-11 flag a build when they removed more than this of what is kept
 
 
 def _base(state: str) -> tuple[str, str]:
@@ -168,6 +221,18 @@ def role_of(state: str) -> int:
 
 def is_leaves(state: str) -> bool:
     return split_state(state)[0].endswith("_leaves")
+
+
+def is_terrain_fill(state: str) -> bool:
+    """What terrain is made of (step 9): turf, fluids and natural minerals, but not the
+    natural blocks builders mostly build with (sandstone, basalt, blackstone, amethyst...),
+    nor ores: terrain has them as sparse specks, and a mass mostly of ore is a builder's
+    material (a texture pack's stone)."""
+    role = role_of(state)
+    if role in (TURF, FLUID):
+        return True
+    base = _base(state)[1]
+    return role == NATURAL and (base in TERRAIN_FILL_BASES or base.startswith("infested_"))
 
 
 def is_soft_ground(state: str) -> bool:
@@ -423,8 +488,136 @@ def _keep(role, material, soft, terrain_mask, height):
     return keep_mat, keep_soft, fp
 
 
+# --------------------------------------------------------------------------- site cleanup (normalize-6)
+
+def _opening_ball(mask: np.ndarray, r: float) -> np.ndarray:
+    """Binary opening of `mask` with a ball of radius r (voxels), by distance transforms:
+    the voxels within r of a voxel whose every neighbour within r is in the mask."""
+    if not mask.any():
+        return mask.copy()
+    box = tuple(slice(max(lo - 1, 0), hi + 2) for lo, hi in zip(*_bbox(mask)))
+    sub = np.pad(mask[box], 1)
+    core = ndimage.distance_transform_edt(sub) > r
+    out = np.zeros_like(mask)
+    if core.any():
+        out[box] = (ndimage.distance_transform_edt(~core) <= r)[1:-1, 1:-1, 1:-1] & mask[box]
+    return out
+
+
+def natural_massifs(kept: np.ndarray, role: np.ndarray, fill: np.ndarray,
+                    terrain_mask: np.ndarray) -> np.ndarray:
+    """Step 9: kept natural blocks that belong to terrain masses (see the module docstring).
+    The masses are measured with the terrain step 1 already took (`terrain_mask`): where a
+    cave or a torch broke a column's ground run, the rock above the break was kept, in thin
+    strips no ball fits in, though it is part of the same block of rock."""
+    out = np.zeros_like(kept)
+    nat_kept = kept & np.isin(role, (NATURAL, TURF, FLUID, COVER))
+    if nat_kept.sum() < MASSIF_MIN:
+        return out
+    nat = nat_kept | terrain_mask
+    thick = _opening_ball(nat, MASSIF_RADIUS)
+    if not thick.any():
+        return out
+    Y = kept.shape[1]
+    built = kept & np.isin(role, (BUILT, WOODY))
+    if built.any():          # the building's structures, not the torches and cobble of a mine in the rock
+        labels, _ = ndimage.label(built, structure=np.ones((3, 3, 3), bool))
+        size = np.bincount(labels.ravel())
+        size[0] = 0
+        big = size >= max(ENVELOPE_MIN, ENVELOPE_SHARE * size.max())
+        built = big[labels]
+    low = np.where(built.any(axis=1), np.argmax(built, axis=1), Y)    # lowest built block
+    low = ndimage.grey_erosion(low, size=(2 * ENVELOPE_REACH + 1,) * 2, mode="nearest")
+    outside = np.arange(Y)[None, :, None] < low[:, None, :]           # below it, or no building near
+    labels, _ = ndimage.label(thick, structure=np.ones((3, 3, 3), bool))
+    for k, box in enumerate(ndimage.find_objects(labels), 1):
+        if box is None:
+            continue
+        part = labels[box] == k
+        if part.sum() < MASSIF_MIN or fill[box][part].mean() < MASSIF_FILL:
+            continue
+        below = part & outside[box]
+        if below.sum() < MASSIF_OUTSIDE * part.sum():   # mostly inside: a stone building's solid
+            continue                                     # core, its base course too
+        out[box] |= below & nat_kept[box]
+    return out
+
+
+def clean_site(kept: np.ndarray, role: np.ndarray, height: np.ndarray,
+               leaves: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+    """Steps 10-11: flat aprons, trees, then detached parts. Returns (kept, apron, detached,
+    stats); `detached` includes the trees (`stats["trees"]`, `stats["detached_trees"]`).
+    `leaves`: every leaf block of the source (step 5 already dropped most of a free crown;
+    a tree is judged by its whole crown, and what is left of it goes)."""
+    Y = kept.shape[1]
+    none = np.zeros_like(kept)
+    material = kept & np.isin(role, (NATURAL, WOODY, BUILT))
+    if not material.any():
+        return kept, none, none, {}
+    lowest = int(np.flatnonzero(material.any(axis=(0, 2)))[0])
+    base = np.where(height >= 0, height + 1, lowest)
+    fp = footprint(material, base)
+    top = _top_index(material)
+    raised = (top >= 0) & (top - base + 1 > FLAT_RISE)
+    square = np.ones((3, 3), bool)
+    protect = ndimage.binary_dilation(fp["near"] | raised, structure=square, iterations=APRON_KEEP)
+    apron = kept & ~protect[:, None, :]
+    kept = kept & ~apron
+
+    # Trees standing against the building: leaves and logs, rooted near the ground, few of
+    # whose leaves touch the building (a green roof, ivy, a hedge or a vertical garden lies
+    # on it), and far fewer logs than leaves (a log cabin with a green roof is no tree).
+    logs = kept & (role == WOODY)
+    trees = np.zeros_like(kept)
+    if (kept & leaves).any():
+        labels, _ = ndimage.label(leaves | logs, structure=np.ones((3, 3, 3), bool))
+        touch = ndimage.binary_dilation(kept & ~leaves & ~logs & np.isin(role, (BUILT, NATURAL)),
+                                        structure=ndimage.generate_binary_structure(3, 1))
+        rise_at = np.arange(Y)[None, :, None] - base[:, None, :]
+        for k, box in enumerate(ndimage.find_objects(labels), 1):
+            if box is None:
+                continue
+            part = labels[box] == k
+            if not (part & kept[box]).any():
+                continue
+            leaf = part & leaves[box]
+            n_leaf = int(leaf.sum())
+            if n_leaf < TREE_LEAVES or int((part & logs[box]).sum()) * TREE_CANOPY > n_leaf:
+                continue
+            if int(rise_at[box][part].min()) > TREE_ROOT_RISE:
+                continue
+            if (leaf & touch[box]).sum() < TREE_CONTACT * n_leaf:
+                trees[box] |= part & kept[box]
+        kept = kept & ~trees
+
+    stats = {"apron": int(apron.sum()), "trees": int(trees.sum()), "detached": 0,
+             "detached_parts": 0, "detached_trees": 0}
+    if not kept.any():
+        return kept, apron, trees, stats
+    bridged = ndimage.binary_dilation(kept, structure=np.ones((3, 3, 3), bool))
+    labels, n = ndimage.label(bridged, structure=np.ones((3, 3, 3), bool))
+    labels = np.where(kept, labels, 0)
+    flat = labels.ravel()
+    size = np.bincount(flat, minlength=n + 1).astype(np.int64)
+    leafy = np.bincount(flat, weights=(leaves | (role == WOODY) | (role == TREE)).ravel(),
+                        minlength=n + 1)
+    built = np.bincount(flat, weights=(role == BUILT).ravel(), minlength=n + 1)
+    size[0] = 0
+    tree = (leafy >= TREE_MASS_SHARE * size) & (built < 0.1 * size) & (size > 0)
+    ref = int(np.argmax(np.where(tree, 0, size))) if (size * ~tree).any() else int(np.argmax(size))
+    keep = (size >= max(LARGE_MIN, LARGE_SHARE * size[ref])) & ~tree
+    keep |= tree & (size > size[ref])            # bigger than the main building: it is the building
+    keep[ref] = True
+    keep[0] = False
+    detached = kept & ~keep[labels]
+    stats.update(detached=int(detached.sum()), detached_parts=int(((size > 0) & ~keep).sum()),
+                 detached_trees=int((tree & ~keep & (size > 0)).sum()))
+    return kept & ~detached, apron, detached | trees, stats
+
+
 def crop_build(build: Build) -> CropResult:
     roles = np.array([role_of(s) for s in build.palette], dtype=np.uint8)
+    fill_pal = np.array([is_terrain_fill(s) for s in build.palette], dtype=bool)
     leaf_pal = np.array([is_leaves(s) for s in build.palette], dtype=bool)
     soft_pal = np.array([is_soft_ground(s) for s in build.palette], dtype=bool)
     invisible_pal = np.array([s != AIR and roles[i] == AIR_R
@@ -458,18 +651,24 @@ def crop_build(build: Build) -> CropResult:
     G = int(np.median(surface[open_cols])) if open_cols.any() else None
     method = "terrain" if G is not None else "none"
 
+    fill = fill_pal[build.blocks]
     keep_mat, keep_soft, fp = _keep(role, material, soft, terrain_mask, height)
-    kept = keep_mat | keep_soft
+    massif = natural_massifs(keep_mat | keep_soft, role, fill, terrain_mask)
+    kept = (keep_mat | keep_soft) & ~massif
     below = kept & (ys < height[:, None, :])
     if kept.any() and below.sum() > BELOW_GROUND_LIMIT * kept.sum():
         height = np.full_like(height, -1)
         method = "fallback"
         keep_mat, keep_soft, fp = _keep(role, material, soft, terrain_mask, height)
-        kept = keep_mat | keep_soft
-        below = kept & (ys < height[:, None, :])
+        massif = natural_massifs(keep_mat | keep_soft, role, fill, terrain_mask)
+        kept = (keep_mat | keep_soft) & ~massif
+    kept, apron, detached, cleanup = clean_site(kept, role, height, leaves)
+    keep_soft &= kept
+    below = kept & (ys < height[:, None, :])
 
     removed = nonair_orig & ~kept
-    landscape = removed & (terrain_mask | tree | soft | invisible_pal[build.blocks])
+    landscape = removed & (terrain_mask | tree | soft | massif | invisible_pal[build.blocks]
+                           | (detached & (leaves | (role == WOODY))))
     site = removed & ~landscape
     before = int(nonair_orig.sum())
     by_role = {ROLE_NAMES[code]: int((removed & (role == code)).sum())
@@ -495,6 +694,10 @@ def crop_build(build: Build) -> CropResult:
         "removed_built_above_ground": int((site & material & (ys > height[:, None, :])).sum()),
         "kept_below_ground": int(below.sum()),
         "kept_landscape": int(keep_soft.sum()),
+        "removed_massif": int(massif.sum()), "removed_apron": cleanup.get("apron", 0),
+        "removed_detached": cleanup.get("detached", 0), "removed_trees": cleanup.get("trees", 0),
+        "detached_parts": cleanup.get("detached_parts", 0),
+        "detached_trees": cleanup.get("detached_trees", 0),
     }
     if box is None:
         return CropResult(np.zeros((1, 1, 1), np.uint16), [AIR], (0, 0, 0),
@@ -548,6 +751,10 @@ def crop_build(build: Build) -> CropResult:
         flags.append("site_linear_removed")
     if method == "fallback":
         flags.append("ground_fallback")
+    for key, flag in (("removed_massif", "terrain_massif_removed"), ("removed_apron", "apron_removed"),
+                      ("removed_trees", "trees_removed"), ("removed_detached", "detached_removed")):
+        if stats[key] > CLEANUP_FLAG * stats["non_air_after"]:
+            flags.append(flag)
     return CropResult(cropped, palette, tuple(lo), ground, stats, flags, landscape, site,
                       terrain_mask)
 
