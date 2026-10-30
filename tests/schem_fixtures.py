@@ -116,7 +116,7 @@ def sponge_v2(path, w: int = 2, h: int = 2, length: int = 2) -> str:
 
 def decode_sponge(path):
     """Read a .schem back as {(x, y, z): blockstate} plus its root compound."""
-    import nbt_safe
+    from minecraft import nbt_safe
 
     root = nbt_safe.load(path)
     w, h, length = int(root["Width"]), int(root["Height"]), int(root["Length"])

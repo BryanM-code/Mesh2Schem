@@ -1,45 +1,21 @@
+# Python
 __pycache__/
 *.py[cod]
+
+# The environments (README, Setup)
 .venv/
-venv/
-env/
+.venv-train/
 
-# Since 2026-10-11 NO data is tracked: data/builds/ stays local (licences; the repo is
-# public, code and docs only). Sync data between machines outside git; see the README.
-
-# The database is NOT tracked, deliberately. It is binary, so git cannot merge two
-# machines' changes to it; and it is derivable, so it does not need to be. Everything the
-# user typed is mirrored into each build's meta.json, and the app rebuilds the database
-# from data/builds/ on startup whenever the two disagree.
-data/collector.db
-data/collector.db-wal
-data/collector.db-shm
-
-# Scratch space for in-flight uploads.
-data/.tmp/
-
-# Thumbnails are a derived cache: re-rendered on demand from the files beside them.
-# Tracking them would mean a binary conflict every time an artefact changed.
-data/builds/*/thumb/
-
-# Temp file written by the conversion step during an origin scan.
-*.originscan.schem
-
-# Synthetic training data (mesh -> .schem pairs) and the asset-metadata cache it is built
-# from. Generated, large, and rebuildable from the index; see docs/mesh-to-schem-plan.md.
-data/synthetic/
-data/architecture-audit-v1/
+# The datasets and everything made from them stay local (licences: docs/dataset.md)
 data/
 
-# ── Data never goes in this repo (licences: see docs). Code and docs only. ──
-# Minecraft builds and worlds
+# This repository holds code and docs only: no builds, worlds, meshes or model weights
 *.schem
 *.schematic
 *.litematic
 *.nbt
 *.mcstructure
 *.mcworld
-# Meshes, voxel arrays and training pairs
 *.glb
 *.gltf
 *.obj
@@ -47,15 +23,8 @@ data/
 *.ply
 *.npz
 *.npy
-# Model weights
 *.pt
 *.pth
 *.ckpt
 *.safetensors
 *.onnx
-# Local data folders
-data/
-datasets/
-pairs/
-checkpoints/
-runs/

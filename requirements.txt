@@ -1,5 +1,15 @@
-Flask>=3.0
+# .venv: the dataset, the pairs and the test sets (Python 3.10):
+#
+#   py -3.10 -m venv .venv
+#   .venv\Scripts\python -m pip install -r requirements.txt
+#
+# The real-photo test set's background removal (`testsets.photos cutout`) also needs rembg,
+# in whichever environment runs that one step.
 nbtlib==2.0.4
-numpy>=1.24
-Pillow>=10.0
+networkx==3.4.2
+numpy==2.2.6
+pillow==12.3.0
+rtree==1.4.1
+scikit-image==0.25.2
+scipy==1.15.3
 trimesh==4.12.2
