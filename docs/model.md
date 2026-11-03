@@ -81,5 +81,7 @@ The test split has not been scored yet: score it once, at the end, on the checkp
 4. **Rare shapes** (walls, panes, trapdoors, doors) are almost never predicted.
 5. **The scores are noisy**: 12 real-TRELLIS val builds give about ±0.02 IoU.
 
-More builds (`real-schems-v2` has 1,012, but pairs exist only for v1's 321) and the photo's
-own colours as an input are the clearest next steps.
+Training on all of `real-schems-v2` (908 train builds; pairs exist only for v1's 321) was
+judged not worth it: more builds don't touch limit 1, and the colours in limit 2 come from
+TRELLIS. A better input would help more: one that keeps the photo's open spaces and its true
+colours.
